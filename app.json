@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "MoneyFit",
+    "slug": "moneyfit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "moneyfit",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#f1f3f4"
+    },
+    "android": {
+      "package": "com.moneyfit.app",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": ["CAMERA", "READ_MEDIA_IMAGES"]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "MoneyFit needs access to your photos so you can attach a bill or receipt.",
+          "cameraPermission": "MoneyFit needs the camera so you can photograph a bill."
+        }
+      ],
+      "expo-secure-store",
+      "expo-sqlite"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "tsconfigPaths": true
+    }
+  }
+}
