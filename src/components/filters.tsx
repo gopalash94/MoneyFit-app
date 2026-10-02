@@ -29,7 +29,7 @@ import { Pressable, Text, View } from "react-native";
 import type { TextStyle, ViewStyle } from "react-native";
 
 import { Icon } from "./Icon";
-import { addMonthKey, fmtMonth, thisMonth } from "@/lib/date";
+import { addMonthKey, fmtMonth, thisMonth, thisYear } from "@/lib/date";
 import { useStyles, useTheme, type Theme } from "@/theme/ThemeProvider";
 import { font, radius, weight } from "@/theme/tokens";
 
@@ -111,6 +111,71 @@ export function MonthNav({ month }: { month: string }) {
   );
 }
 
+/**
+ * The same control a year at a time, for the year screen.
+ *
+ * Shares `MonthNav`'s shape deliberately — same row, same disabled-not-hidden forward
+ * control, same reset affordance in the same place — because they appear in the same slot
+ * of the same page head and a user stepping through years should not have to learn a
+ * second gesture. Only three things differ, and each for a reason:
+ *
+ *   - **The label is narrower.** Every year is four digits, so unlike "May 2026" versus
+ *     "September 2026" there is nothing to stop jumping about; `minWidth` is just enough
+ *     to keep the chevrons apart.
+ *   - **The reset says "This year"**, which is what the web's says. "Today" would be
+ *     wrong by up to twelve months.
+ *   - **There is no lower bound here**, matching the web. The year screen's own
+ *     `FIRST_YEAR` guard is what stops `?year=0` reaching SQL; a nav that refused to go
+ *     back past the first recorded bill would need a query to know where that was.
+ */
+export function YearNav({ year }: { year: number }) {
+  const s = useStyles(styles);
+  const setParams = useSetParams();
+  const now = thisYear();
+
+  return (
+    <View style={s.monthNav}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Previous year"
+        onPress={() => setParams({ year: String(year - 1) })}
+        style={({ pressed }) => [s.iconBtn, pressed ? s.pressed : null]}
+      >
+        <ChevIcon name="chevronLeft" />
+      </Pressable>
+
+      <Text style={s.yearLabel} numberOfLines={1}>
+        {year}
+      </Text>
+
+      {year < now ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Next year"
+          onPress={() => setParams({ year: String(year + 1) })}
+          style={({ pressed }) => [s.iconBtn, pressed ? s.pressed : null]}
+        >
+          <ChevIcon name="chevronRight" />
+        </Pressable>
+      ) : (
+        <View accessibilityRole="button" accessibilityState={{ disabled: true }} style={[s.iconBtn, s.disabled]}>
+          <ChevIcon name="chevronRight" />
+        </View>
+      )}
+
+      {year !== now ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setParams({ year: undefined })}
+          style={({ pressed }) => [s.todayBtn, pressed ? s.pressed : null]}
+        >
+          <Text style={s.todayLabel}>This year</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
 function ChevIcon({ name }: { name: "chevronLeft" | "chevronRight" }) {
   const t = useTheme();
   return <Icon name={name} size={20} color={t.c.text2} />;
@@ -180,6 +245,13 @@ const styles = (t: Theme) => ({
     ...font.cardTitle,
     color: t.c.text,
     minWidth: 132,
+    textAlign: "center",
+  } as TextStyle,
+  // Four digits always, so this only has to clear the chevrons.
+  yearLabel: {
+    ...font.cardTitle,
+    color: t.c.text,
+    minWidth: 64,
     textAlign: "center",
   } as TextStyle,
   todayBtn: {

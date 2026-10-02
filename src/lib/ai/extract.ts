@@ -1,5 +1,5 @@
 /**
- * AI feature 1 of 4 — read a bill photo or PDF and fill in the form.
+ * Read a bill photo or PDF and fill in the form.
  *
  * The output is a *draft*, never a saved row. Extraction lands you on the normal
  * new-bill form with the fields already populated and the confidence stated, and
@@ -8,18 +8,25 @@
  * at all, because you will not find it until the month does not add up.
  *
  * `source = 'ai'` is stamped on the resulting bill so provenance survives — the
- * schema has had that CHECK constraint since the first migration for this.
+ * schema has had that CHECK constraint since the first migration for this, and it
+ * is why `bills.source` is still here when the web app has dropped it.
  *
- * Unchanged from the web app apart from the content-block type, which now comes
- * from `client.ts` rather than the SDK. The schema and the prompt are the whole
- * value of this file and they are byte-for-byte what the web app sends, so a bill
- * photographed on the phone is read exactly as the same photo uploaded to the
- * desktop app would be.
+ * **This feature has no equivalent on the web any more, on purpose.** The desktop
+ * app has a keyboard and a statement importer; a phone has a camera, and pointing it
+ * at a restaurant bill is the one thing it can do that a laptop cannot. So it stayed
+ * when Anthropic went, and it now runs on the same Gemini key Ask uses — one key to
+ * configure, not two. The schema and the prompt below are byte-for-byte what the web
+ * app used to send, because they were the whole value of the file and none of that
+ * value was in whose endpoint received them.
+ *
+ * Two things changed with the provider, both in `fileBlock()` at the bottom:
+ * Gemini has one inline part type for both a photo and a PDF, so the branch went;
+ * and `image/gif` is not on Gemini's list, so it went from `ImageMediaType` and from
+ * the picker's accept list.
  */
 
 import { z } from "zod";
-import { AI_MODEL, askStructured, type ContentBlock, type ImageMediaType } from "./client";
-import { isPdf } from "../upload-meta";
+import { AI_MODEL, askStructured, type InlineMediaType, type Part } from "./gemini";
 
 /**
  * Amounts come back in **rupees**, not paise. The model is far more reliable
@@ -95,12 +102,12 @@ export async function extractBill(input: ExtractInput): Promise<{
     `Available categories — pick exactly one of these names, or null:\n` +
     input.categories.map((c) => `- ${c}`).join("\n");
 
-  // The document block goes first. Claude reads a PDF or image better when the
-  // page precedes the question about it, and the API documents that ordering for
-  // documents specifically.
-  const content: ContentBlock[] = [
+  // The file goes first. Both providers document that ordering for a document or
+  // image followed by a question about it, and the reason is the same either way:
+  // the instruction reads as being about the page when the page is already there.
+  const content: Part[] = [
     fileBlock(input.base64, input.mimeType),
-    { type: "text", text: instruction },
+    { text: instruction },
   ];
 
   const value = await askStructured({
@@ -118,20 +125,21 @@ export async function extractBill(input: ExtractInput): Promise<{
   return { value, model: AI_MODEL };
 }
 
-function fileBlock(base64: string, mimeType: string): ContentBlock {
-  if (isPdf(mimeType)) {
-    return {
-      type: "document",
-      source: { type: "base64", media_type: "application/pdf", data: base64 },
-    };
-  }
+/**
+ * The file, as one inline part.
+ *
+ * Anthropic needed two different block types here — `document` for a PDF, `image`
+ * for a photo, each with its own `source` wrapper. Gemini has one: `inlineData` with
+ * a MIME type, and `application/pdf` is just another MIME type. So the branch that
+ * used to be in this function is gone rather than preserved, which is the whole
+ * change.
+ */
+function fileBlock(base64: string, mimeType: string): Part {
   return {
-    type: "image",
-    source: {
-      type: "base64",
+    inlineData: {
       // Narrowed by `isAiReadable` before we ever get here; the cast is only to
-      // satisfy the literal union in client.ts, which does not include image/heic.
-      media_type: mimeType as ImageMediaType,
+      // satisfy the literal union in gemini.ts, which does not include image/heic.
+      mimeType: mimeType as InlineMediaType,
       data: base64,
     },
   };

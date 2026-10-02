@@ -52,7 +52,7 @@ import { AttachmentPicker, Form, FormActions, Submit } from "@/components/form";
 import { PlainScreen } from "@/components/Screen";
 import { AiNotConfigured, Card, LinkButton, PageHead } from "@/components/ui";
 import { scanBill } from "@/lib/actions/scan";
-import { aiConfigured } from "@/lib/ai/client";
+import { aiConfigured } from "@/lib/ai/gemini";
 import { useStyles, type Theme } from "@/theme/ThemeProvider";
 import { font, space } from "@/theme/tokens";
 
@@ -93,7 +93,7 @@ function Scan() {
           <>
             <Card
               title="The bill"
-              note="A photo or a PDF. Kept in this app's own storage; the file is sent to Claude to be read and nowhere else."
+              note="A photo or a PDF. Kept in this app's own storage; the file is sent to Gemini to be read and nowhere else."
             >
               <AttachmentPicker quality={0.6} max={1} />
               {err.files ? <Text style={s.fieldError}>{err.files}</Text> : null}

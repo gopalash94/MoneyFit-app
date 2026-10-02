@@ -11,9 +11,20 @@
  * resolved.
  *
  * Two CSS facts that had to become tokens rather than rules:
- *   • `--on-accent` is white, but `:root[data-theme="dark"] .btn` overrides the
- *     text on a filled accent button to #0b1a2e — because the dark palette's
- *     blue is a light blue. That is a palette fact, so `onAccent` carries it.
+ *   • `--on-accent` is the text that goes on a filled accent surface: white in
+ *     light mode, #0b1a2e in dark, because the dark palette's blue is a *light*
+ *     blue and white-on-light-blue is unreadable. A palette fact, so `onAccent`
+ *     carries it — which is also how the web now states it.
+ *
+ *     It used to be a rule there, and the rule was a bug worth recording. The
+ *     dark override was written as `:root[data-theme="dark"] .btn { color: … }`,
+ *     a selector of specificity (0,3,0) — and every variant that *un*-fills a
+ *     button, `.btn-ghost` and `.btn-outline`, is a single class at (0,1,0). So
+ *     the override beat all of them and painted near-black text on a
+ *     near-black transparent background: invisible, in exactly the places a
+ *     button has no accent fill to sit on. A token cannot do that, because it
+ *     is read by whoever draws the fill rather than applied to everything that
+ *     happens to be a button.
  *   • `.chip[data-tone="warn"]` needs a hand-picked brown in light mode
  *     (#b06000, the one hardcoded colour in the stylesheet) and takes --amber
  *     back in dark. That is `warnText`.
@@ -90,7 +101,10 @@ export const LIGHT: Palette = {
 
 export const DARK: Palette = {
   blue: "#8ab4f8",
-  blueDim: "#2d4a73",
+  // Raised from #2d4a73 with the dark-palette legibility pass. It is the tint behind
+  // a selected chip and a progress track, and against #1e1f20 the old value was too
+  // close to the surface to read as a fill at all.
+  blueDim: "#28405f",
   green: "#81c995",
   greenDim: "#2a4a34",
   amber: "#fdd663",
@@ -110,7 +124,11 @@ export const DARK: Palette = {
 
   text: "#e8eaed",
   text2: "#9aa0a6",
-  text3: "#80868b",
+  // Lifted from #80868b, which is the *light* palette's third text colour and was
+  // carried into this one unchanged. On #131314 it fell under 4.5:1, and this app puts
+  // real content at `text3` — a column heading, a metric's label, a row's figures — so
+  // it is not decoration that can afford to be dim.
+  text3: "#949a9f",
   onAccent: "#0b1a2e",
   warnText: "#fdd663",
 };

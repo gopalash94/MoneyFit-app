@@ -38,6 +38,7 @@ import type { TextStyle, ViewStyle } from "react-native";
 import { useRouter } from "expo-router";
 
 import {
+  AccountSelect,
   ActionButton,
   AmountInput,
   AttachmentPicker,
@@ -63,7 +64,7 @@ import type { FormData } from "@/lib/form-data";
 // Type-only on the web so the queries module never entered the browser bundle. There
 // is no bundle split here, but the import stays type-only because that is all it is.
 import type { ScanDraft } from "@/lib/queries/scan";
-import type { BillRow, BillStatus, Category, Kind } from "@/lib/types";
+import type { BillRow, BillStatus, Category, Kind, PaymentAccount } from "@/lib/types";
 import { useStyles, type Theme } from "@/theme/ThemeProvider";
 import { font, radius, weight } from "@/theme/tokens";
 
@@ -80,6 +81,8 @@ type Defaults = {
   category_id: number | null;
   notes: string | null;
   recurrence: Recurrence;
+  /** Optional so a caller with only the bill's own fields still satisfies the type. */
+  holding_id?: number | null;
 };
 
 const CONFIDENCE: Record<ScanDraft["confidence"], { tone: "good" | "warn" | "bad"; label: string }> = {
@@ -91,6 +94,7 @@ const CONFIDENCE: Record<ScanDraft["confidence"], { tone: "good" | "warn" | "bad
 export function BillForm({
   action,
   categories,
+  accounts = [],
   bill,
   scan,
   discard,
@@ -99,6 +103,8 @@ export function BillForm({
 }: {
   action: (prev: FormState, fd: FormData) => Promise<FormState>;
   categories: Category[];
+  /** Cards, wallets and loans this can be tagged to. Empty is a valid state. */
+  accounts?: PaymentAccount[];
   /** Absent when creating. */
   bill?: BillRow | null;
   /** A draft read off a photo or PDF, waiting to be confirmed. */
@@ -243,6 +249,14 @@ export function BillForm({
                   defaultValue={pre?.recurrence ?? "none"}
                   options={RECURRENCES.map((r) => ({ value: r, label: RECURRENCE_LABEL[r] }))}
                 />
+              </Field>
+
+              <Field
+                label="Paid from"
+                name="holding_id"
+                hint="Optional — lets Ask answer “how much went on this card”"
+              >
+                <AccountSelect accounts={accounts} defaultId={pre?.holding_id} />
               </Field>
 
               <Field label="Notes" name="notes" span>

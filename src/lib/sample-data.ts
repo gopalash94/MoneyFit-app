@@ -722,11 +722,16 @@ const WIPE_ORDER: readonly string[] = [
   "valuations",
   "holdings",
   "budgets",
-  "ai_cache",
+  "statement_batches",
+  "ask_turns",
+  "scan_drafts",
   "detection_dismissals",
 ];
 
-/** The ones with AUTOINCREMENT, so identity restarts. `detection_dismissals` has a text key. */
+/**
+ * The ones with AUTOINCREMENT, so identity restarts. `detection_dismissals` and
+ * `scan_drafts` have text keys and never appear in `sqlite_sequence`.
+ */
 const WIPE_SEQUENCES: readonly string[] = [
   "attachments",
   "bills",
@@ -736,7 +741,8 @@ const WIPE_SEQUENCES: readonly string[] = [
   "valuations",
   "holdings",
   "budgets",
-  "ai_cache",
+  "statement_batches",
+  "ask_turns",
 ];
 
 /**
@@ -745,6 +751,12 @@ const WIPE_SEQUENCES: readonly string[] = [
  * the files behind them are removed by the caller, which is the half of this
  * that touches the filesystem.
  *
+ * Three tables store a file name, so three contribute to that list: `attachments`
+ * (receipts), `statement_batches` (the imported statement itself) and
+ * `scan_drafts` — whose key *is* the file name of a photographed bill nobody
+ * confirmed. Miss any of them and a wipe leaves files in the documents directory
+ * that no row will ever name again, which is storage nothing can reclaim.
+ *
  * The Postgres version was one `TRUNCATE … RESTART IDENTITY CASCADE`. SQLite has
  * no TRUNCATE, so this is a DELETE per table plus a delete from `sqlite_sequence`
  * — which is how identity is restarted, and it matters: a wiped app really does
@@ -752,7 +764,16 @@ const WIPE_SEQUENCES: readonly string[] = [
  */
 export async function wipeAll(): Promise<{ files: string[] }> {
   return tx(async (c) => {
-    const { rows } = await c.query<{ file_name: string }>("SELECT file_name FROM attachments");
+    // UNION, not UNION ALL: one name twice would be a second unlink of a file
+    // that is already gone, and the caller's unlink is best-effort rather than
+    // checked. `statement_batches.file_name` is nullable, hence the guard.
+    const { rows } = await c.query<{ file_name: string }>(
+      `SELECT file_name FROM attachments
+       UNION
+       SELECT file_name FROM statement_batches WHERE file_name IS NOT NULL
+       UNION
+       SELECT file_name FROM scan_drafts`,
+    );
 
     for (const table of WIPE_ORDER) await c.query(`DELETE FROM ${table}`);
 

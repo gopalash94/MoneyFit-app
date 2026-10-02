@@ -564,7 +564,7 @@ export function AiNotConfigured({ feature }: { feature: string }) {
   return (
     <Banner tone="info" icon="info">
       <Text style={[s.bannerText, { color: fg }]}>
-        <Text style={s.strong}>{feature} needs an Anthropic API key.</Text>
+        <Text style={s.strong}>{feature} needs a Gemini API key.</Text>
         {"\n"}
         Add one under Settings, and it is kept in this phone’s keystore rather than in the app’s
         data. Everything else — every chart, forecast and detector in this app — is computed on

@@ -1,7 +1,7 @@
 /**
  * AI feature 3 of 4 — ask a question in English, get an answer from your own data.
  *
- * Claude writes a read-only query against the analytics views; SQLite runs it; the
+ * Gemini writes a read-only query against the analytics views; SQLite runs it; the
  * rows go straight to the screen. The model never sees the results. That is the
  * design guarantee and it survived the port intact: it writes the query and a
  * sentence about what the query does, so there is no step at which a *figure* can
@@ -53,8 +53,7 @@ import { z } from "zod";
 import { ANALYTICS_VIEWS, VIEW_NOTES } from "../../db/views";
 import { poolRo } from "../db";
 import { thisMonth, today } from "../date";
-import { cached } from "./cache";
-import { AI_MODEL, AiError, askStructured } from "./client";
+import { AiError, askStructured } from "./gemini";
 
 /** Rows shown. The appended LIMIT asks for one more, so truncation is detectable. */
 export const MAX_ROWS = 200;
@@ -175,10 +174,7 @@ When the question cannot be answered from these views — it asks about a bank b
 
 Write the plainest SQL that is correct. This is somebody's own small database: there is no performance problem to solve, and a readable query is one they can check.`;
 
-export async function generateSql(
-  question: string,
-  schema: string,
-): Promise<{ value: GeneratedQuery; model: string }> {
+export async function generateSql(question: string, schema: string): Promise<GeneratedQuery> {
   const value = await askStructured({
     schema: GeneratedQuery,
     system: SYSTEM,
@@ -198,10 +194,12 @@ export async function generateSql(
     timeoutMs: 120_000,
   });
 
-  return {
-    value: { ...value, assumptions: value.assumptions.slice(0, 3) },
-    model: AI_MODEL,
-  };
+  // The prompt asks for at most three and the schema does not enforce a maximum, so
+  // the cap is applied here rather than trusted. Returned bare: this used to be
+  // `{ value, model }` because `cached()` needed a producer that reported which model
+  // had written the answer it was storing, and with the cache gone the model name is
+  // simply `AI_MODEL`, read once by the action that records the turn.
+  return { ...value, assumptions: value.assumptions.slice(0, 3) };
 }
 
 /**
@@ -447,88 +445,24 @@ function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<
   });
 }
 
-export type Answer = {
-  question: string;
-  answerable: boolean;
-  /** The query as run, including any LIMIT this app appended. Always shown. */
-  sql: string | null;
-  explanation: string;
-  assumptions: string[];
-  chart: GeneratedQuery["chart"];
-  result: QueryResult | null;
-  limitAdded: boolean;
-  model: string | null;
-  /**
-   * Set only when Claude could not be reached and a query written earlier for this
-   * same question was reused. The rows are still current — they are always fetched
-   * fresh — so this is a note, not a warning.
-   */
-  staleNote: string | null;
-};
-
-/**
- * Lives here rather than in the action module because a module of actions exports
- * only functions by convention in this app, and next to `Answer` is where it belongs
- * anyway.
- */
-export type AskState = { question: string; error?: string; answer?: Answer } | null;
-
-/**
- * The whole feature, end to end.
+/*
+ * There is no `answerQuestion` here any more, and no `Answer` or `AskState` either.
  *
- * Only *generation* is cached, never the rows: the same question asked twice in a
- * day should not cost two API calls, but it must not show yesterday's numbers
- * either. So the cache key covers the question, the schema description and the
- * current month — a new column or a new month invalidates the query text — and the
- * query itself is re-run every time.
+ * This module used to own the whole sequence — describe, generate, validate, run —
+ * and hand back one object the screen rendered directly. That made sense while the
+ * answer lived in component state and died with it. It stopped making sense when
+ * `ask_turns` arrived, for a reason that is worth writing down because it is the
+ * shape of the web app and this is the point the two converged:
+ *
+ *   **Three of the four outcomes are not an answer.** A sequence that returns a
+ *   single value can only describe one of them and must throw for the rest, and what
+ *   is thrown has no room for the thing the thread most wants to keep — the SQL the
+ *   model wrote. A query rejected by `validateSql` and a query SQLite would not run
+ *   are both worth recording *with their SQL next to them*, which is exactly what
+ *   `ask_turns.sql_text` is for.
+ *
+ * So `src/lib/actions/ask.ts` is the sequence now, one `try` per step, a turn written
+ * for every outcome — the same four branches as the web's `actions/ask.ts`. What is
+ * left here is what it orchestrates: `describeSchema`, `generateSql`, `validateSql`,
+ * `runQuery`. The four barriers are untouched; only who calls them in order moved.
  */
-export async function answerQuestion(question: string): Promise<Answer> {
-  const schema = await describeSchema();
-  const scope = question.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 200);
-
-  const hit = await cached<GeneratedQuery>(
-    "ask",
-    scope,
-    { question: scope, schema, month: thisMonth() },
-    () => generateSql(question, schema),
-  );
-  const gen = hit.value;
-
-  if (!gen.answerable || !gen.sql.trim()) {
-    return {
-      question,
-      answerable: false,
-      sql: null,
-      explanation: gen.explanation,
-      assumptions: gen.assumptions,
-      chart: null,
-      result: null,
-      limitAdded: false,
-      model: hit.model,
-      staleNote: hit.staleReason ?? null,
-    };
-  }
-
-  const { sql, limitAdded } = validateSql(gen.sql);
-  const result = await runQuery(sql);
-
-  return {
-    question,
-    answerable: true,
-    sql,
-    explanation: gen.explanation,
-    assumptions: gen.assumptions,
-    // A chart naming a column the query does not return would render as an empty
-    // box, so it is dropped here rather than guarded in three places on the screen.
-    chart:
-      gen.chart &&
-      result.columns.includes(gen.chart.label_column) &&
-      result.columns.includes(gen.chart.value_column)
-        ? gen.chart
-        : null,
-    result,
-    limitAdded,
-    model: hit.model,
-    staleNote: hit.staleReason ?? null,
-  };
-}

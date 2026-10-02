@@ -21,16 +21,18 @@
  *
  * `generate_series` + `date_trunc` + `make_interval` became a `WITH RECURSIVE`
  * spine over 'YYYY-MM-01' strings. ISO dates sort and compare correctly as text,
- * so `mo < date('now','localtime','start of month')` terminates it, and
- * `date(mo, '+1 month', '-1 day')` gives month end without any interval type.
- * `CURRENT_DATE` was avoided deliberately: in SQLite it is UTC, which in India
- * is yesterday for five and a half hours every day.
+ * so `mo < ?2` terminates it, and `date(mo, '+1 month', '-1 day')` gives month end
+ * without any interval type. **Neither end of that spine is a clock.** It used to
+ * anchor on `date('now','localtime','start of month')`; the year screen needs a window
+ * that does not end today, so both bounds are parameters and the clock lives in
+ * `netWorthSeries`, in JS. `CURRENT_DATE` was avoided deliberately whichever way round:
+ * in SQLite it is UTC, which in India is yesterday for five and a half hours every day.
  */
 
 import { b, q, q1 } from "../db";
 import type { ISODate, MonthKey } from "../date";
-import { monthBounds } from "../date";
-import type { Contribution, HoldingRow, Valuation } from "../types";
+import { addMonthKey, monthBounds, thisMonth } from "../date";
+import type { Contribution, HoldingRow, PaymentAccount, Valuation } from "../types";
 
 // invested_minor is derived from the contribution rows every time. There is no
 // stored cost column to fall out of step with them.
@@ -65,6 +67,24 @@ export async function getHolding(id: number): Promise<HoldingRow | null> {
   return row ? { ...row, archived: b(row.archived) } : null;
 }
 
+/**
+ * The holdings a bill can be paid from — cards, wallets and loans.
+ *
+ * Deliberately not every holding: tagging a grocery bill to a PPF account is a
+ * mistake the picker should make impossible rather than validate. `other` is in
+ * because that is where a bank account with no better type lands.
+ */
+export async function listPaymentAccounts(): Promise<PaymentAccount[]> {
+  return q(
+    // `NOT archived` became `archived = 0`, the same translation the rest of this
+    // directory makes. The returned columns are all text or integer, so unlike
+    // `listHoldings` there is no boolean to map back through `b()`.
+    `SELECT id, name, asset_type FROM holdings
+      WHERE archived = 0 AND asset_type IN ('credit_card', 'cash', 'loan', 'other')
+      ORDER BY asset_type, name`,
+  );
+}
+
 export async function holdingContributions(holdingId: number): Promise<Contribution[]> {
   return q<Contribution>(
     `SELECT id, amount_minor, txn_date, note FROM holding_contributions
@@ -94,16 +114,24 @@ export async function investedInMonth(mk: MonthKey, startDay = 1): Promise<numbe
   return row?.total ?? 0;
 }
 
+export type NetWorthPoint = {
+  month: MonthKey;
+  assets_minor: number;
+  liabilities_minor: number;
+  net_minor: number;
+};
+
 /**
- * Net worth at each month end for the last `months` months, carrying every
- * holding's most recent valuation forward.
+ * Net worth at each month end across [from, to], carrying every holding's most
+ * recent valuation forward.
  *
  * The carry-forward is the whole trick: for each (month, holding) pair it grabs
  * the newest valuation dated at or before that month's end. A holding you valued
  * once in January therefore still counts in June, which is what a net worth
  * chart has to do — but a holding you had not bought yet contributes nothing,
  * which is what the `IS NOT NULL` filter preserves now that the inner join is a
- * subquery.
+ * subquery. That is also what makes this correct for a *past* year: ask for 2025
+ * and anything acquired in 2026 is absent from it rather than back-dated into it.
  *
  * Closed holdings are excluded from every month, not just the recent ones. That
  * restates history when you sell something, which is a real cost — but the
@@ -111,20 +139,23 @@ export async function investedInMonth(mk: MonthKey, startDay = 1): Promise<numbe
  * forever, so the final point of this line would disagree with the net worth
  * figure printed beside it. A chart that contradicts its own headline is not a
  * chart anyone can use.
+ *
+ * **The spine took both bounds when the year screen arrived.** It used to anchor on
+ * `date('now','localtime','start of month')` and count backwards, which can only ever
+ * produce a window ending now — no use to a screen showing 2025. Both ends are
+ * parameters now, and the clock moved out of SQL into `netWorthSeries` below, where it
+ * is the same `thisMonth()` Home, Profile and Invest already use.
  */
-export async function netWorthSeries(months = 12): Promise<
-  { month: MonthKey; assets_minor: number; liabilities_minor: number; net_minor: number }[]
-> {
+export async function netWorthByMonth(from: MonthKey, to: MonthKey): Promise<NetWorthPoint[]> {
   return q(
-    // The spine: the first of the month, `months - 1` months back, stepped
-    // forward to this month. Concatenating the count into the modifier string is
-    // valid — date()'s modifiers are ordinary text expressions, not literals —
-    // and the count is a bound parameter, not interpolated SQL.
+    // The spine: every month-start from `from` to `to` inclusive. The anchor carries
+    // `WHERE ?1 <= ?2` for the reason `queries/stats.ts` gives — an inverted range must
+    // yield no rows, as `generate_series` did, and the recursion alone would still have
+    // emitted the first month.
     `WITH RECURSIVE m(mo) AS (
-       SELECT date('now', 'localtime', 'start of month', '-' || (?1 - 1) || ' months')
+       SELECT ?1 WHERE ?1 <= ?2
        UNION ALL
-       SELECT date(mo, '+1 month') FROM m
-       WHERE mo < date('now', 'localtime', 'start of month')
+       SELECT date(mo, '+1 month') FROM m WHERE mo < ?2
      )
      SELECT substr(x.mo, 1, 7) AS month,
             SUM(CASE WHEN x.side = 'asset'     THEN x.value_minor ELSE 0 END) AS assets_minor,
@@ -144,8 +175,23 @@ export async function netWorthSeries(months = 12): Promise<
      ) x
      WHERE x.value_minor IS NOT NULL
      GROUP BY x.mo ORDER BY x.mo`,
-    [months],
+    [`${from}-01`, `${to}-01`],
   );
+}
+
+/**
+ * The rolling window every month-anchored screen wants: the last `months` months
+ * ending with the current one.
+ *
+ * The anchor is the app's `thisMonth()` rather than SQL's
+ * `date('now','localtime')`, which is where it used to live. Same clock either way —
+ * the phone's, as `date.ts` explains — and it now matches Home, Profile and Invest,
+ * which all work out their own month in JS and would otherwise be able to disagree
+ * with this query across a midnight.
+ */
+export async function netWorthSeries(months = 12): Promise<NetWorthPoint[]> {
+  const to = thisMonth();
+  return netWorthByMonth(addMonthKey(to, -(months - 1)), to);
 }
 
 /** Current totals for the Profile net-worth hero. */
@@ -204,7 +250,7 @@ export async function allAssetContributions(): Promise<{ txn_date: ISODate; amou
  */
 export async function portfolioValueSeries(): Promise<{ as_of: ISODate; value_minor: number }[]> {
   return q(
-    // Same inner-join-to-subquery treatment as netWorthSeries: unqualified
+    // Same inner-join-to-subquery treatment as netWorthByMonth: unqualified
     // `as_of` inside the subquery is the valuations column, `d.as_of` the
     // outer one, exactly as the LATERAL read.
     `WITH d AS (SELECT DISTINCT as_of FROM valuations)

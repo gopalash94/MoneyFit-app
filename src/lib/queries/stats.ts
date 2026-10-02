@@ -143,9 +143,23 @@ export async function categoryMoM(
   );
 }
 
-/** Income vs expense per month over a window. */
+/**
+ * Income vs expense per month over a window.
+ *
+ * `to` is optional because the rolling screens only ever want "everything since": a
+ * window that ends at today needs no upper bound, and adding one to those call sites
+ * would be noise. A *named* window does need one — the year screen asks for 2026 while
+ * standing in 2027 — so it is here, and null means open-ended.
+ *
+ * `($2::date IS NULL OR …)` on Postgres; the cast is what told it which type the
+ * parameter was in a context where NULL alone is ambiguous. SQLite has no such problem
+ * and no such cast, so the guard is the bare `?2 IS NULL`. The *dates compare as
+ * strings*, which is the whole reason `ISODate` is `YYYY-MM-DD`: lexical order and
+ * chronological order are the same, so `txn_date <= ?2` needs no date type at all.
+ */
 export async function cashflowByMonth(
   from: ISODate,
+  to?: ISODate,
 ): Promise<{ month: MonthKey; income_minor: number; expense_minor: number; net_minor: number }[]> {
   return q(
     `SELECT substr(txn_date, 1, 7) AS month,
@@ -154,9 +168,9 @@ export async function cashflowByMonth(
             (COALESCE(SUM(CASE WHEN kind = 'income'  THEN amount_minor END), 0)
            - COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_minor END), 0)) AS net_minor
      FROM bills
-     WHERE status = 'paid' AND txn_date >= ?1
+     WHERE status = 'paid' AND txn_date >= ?1 AND (?2 IS NULL OR txn_date <= ?2)
      GROUP BY 1 ORDER BY 1`,
-    [from],
+    [from, to ?? null],
   );
 }
 
@@ -244,13 +258,28 @@ export async function overallBudget(mk: MonthKey, fallbackMinor: number): Promis
   return row?.limit_minor ?? fallbackMinor;
 }
 
-/** Biggest single expenses in a month — the "where did it go" answer. */
-export async function largestExpenses(
-  mk: MonthKey,
-  startDay = 1,
+export type BiggestExpense = {
+  id: number;
+  merchant: string;
+  amount_minor: number;
+  txn_date: ISODate;
+  name: string | null;
+};
+
+/**
+ * Biggest single expenses between two dates — the "where did it go" answer.
+ *
+ * This used to be inlined in `largestExpenses` below, because a budgeting month was the
+ * only window anything asked for. The year screen asks for a calendar year, and a year
+ * is not a month, so the date pair is the parameter and the month is one caller of it.
+ * `track.tsx` reads its row type through `Awaited<ReturnType<…>>` and so is unaffected
+ * by the shape moving out into `BiggestExpense`.
+ */
+export async function largestExpensesBetween(
+  start: ISODate,
+  end: ISODate,
   limit = 5,
-): Promise<{ id: number; merchant: string; amount_minor: number; txn_date: ISODate; name: string | null }[]> {
-  const { start, end } = monthBounds(mk, startDay);
+): Promise<BiggestExpense[]> {
   return q(
     `SELECT b.id, b.merchant, b.amount_minor, b.txn_date, c.name
      FROM bills b LEFT JOIN categories c ON c.id = b.category_id
@@ -258,6 +287,16 @@ export async function largestExpenses(
      ORDER BY b.amount_minor DESC LIMIT ?3`,
     [start, end, limit],
   );
+}
+
+/** The same question asked of one budgeting month, which is how Track asks it. */
+export async function largestExpenses(
+  mk: MonthKey,
+  startDay = 1,
+  limit = 5,
+): Promise<BiggestExpense[]> {
+  const { start, end } = monthBounds(mk, startDay);
+  return largestExpensesBetween(start, end, limit);
 }
 
 /**
@@ -323,9 +362,15 @@ export async function dataSpan(): Promise<{ first: ISODate | null; last: ISODate
  * you started using two months ago should be averaged over two months, not over
  * six. Dividing by the window length instead is how "typical monthly spend on
  * school fees" ends up a third of the real figure.
+ *
+ * `to` is optional for the reason `cashflowByMonth` gives — and note what that does to
+ * the month count, deliberately: bounded to one year, `months` is how many months of
+ * *that year* the category appears in, so the per-month average the year screen prints
+ * is an average over the year rather than over its whole history.
  */
 export async function categoryTotalsSince(
   from: ISODate,
+  to?: ISODate,
 ): Promise<{ name: string; color: string; total_minor: number; months: number }[]> {
   return q(
     `SELECT COALESCE(c.name, 'Uncategorised') AS name,
@@ -334,9 +379,10 @@ export async function categoryTotalsSince(
             count(DISTINCT substr(b.txn_date, 1, 7)) AS months
      FROM bills b
      LEFT JOIN categories c ON c.id = b.category_id
-     WHERE b.kind = 'expense' AND b.status = 'paid' AND b.txn_date >= ?1
+     WHERE b.kind = 'expense' AND b.status = 'paid'
+       AND b.txn_date >= ?1 AND (?2 IS NULL OR b.txn_date <= ?2)
      GROUP BY 1, 2
      ORDER BY total_minor DESC`,
-    [from],
+    [from, to ?? null],
   );
 }

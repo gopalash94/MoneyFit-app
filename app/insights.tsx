@@ -4,29 +4,23 @@
  * Track is descriptive: it shows what happened, in as much detail as you care to look at.
  * This screen is the opposite shape. It answers three questions nobody wants to work out by
  * reading tables — where the month is heading, what looks out of place, and what is already
- * committed for the months after it — and then lets Claude say which of those actually
- * matters.
+ * committed for the months after it — and then says which of those actually matters.
  *
- * The order is deliberate, and it is the web's: everything below the narrative card is
- * arithmetic over your own rows and works with no API key at all; the AI section is the
- * first thing on the screen when there is one and a short explanation when there is not.
- * Nothing further down changes either way, so the screen is never a stub.
+ * The order is deliberate, and it is the web's: the summary card leads, because the ranked
+ * version of the screen is the reason to open it, and everything below it is the arithmetic
+ * that summary is drawn from. All of it is computed on this phone, from your own rows.
  *
- * **The one structural change: `Narrative` has its own `useLive`.** On the web the page
- * awaits the AI call, so the whole page blocks on it — acceptable for a server render that
- * streams, and fatal here. A phone showing nothing for ten to thirty seconds contradicts
- * the paragraph above: the deterministic half would be held hostage by the half that needs
- * a network. So the fifteen reads and the narrative are two separate loads. The sections
- * paint as soon as SQLite answers; the card above them shows a spinner, then the summary,
- * then — if the call fails — the web's own warn banner, which says in as many words that
- * everything below is unaffected.
+ * **The structural change that used to be here is gone, and that is worth recording.** The
+ * summary was a hosted-model call, so `Narrative` had a `useLive` of its own: the fifteen
+ * SQLite reads could not be held hostage to a network round trip, and a failure had to
+ * degrade to a banner rather than take the screen down with it. There was also a cache, so
+ * that a `refreshAll()` from anywhere did not pay for the same month twice.
  *
- * That is safe with `useLive` for two reasons worth stating, because both are properties of
- * other files rather than of this one. `useLive` captures `load` through a ref, so the
- * freshly-built `brief` is the one that gets sent even though `deps` is only `[month]` — it
- * has to be, since `deps` must stay a constant-length list of primitives. And `cached()`
- * fingerprints the brief, so a `refreshAll()` from anywhere costs an API call only when the
- * figures it would summarise have actually moved.
+ * `writeInsights` is synchronous arithmetic over the brief this file already builds, so the
+ * card is now assembled during the same render as everything else. No second load, no
+ * spinner, no error banner, no retry, no "needs an API key" empty state and no cache — none
+ * of those have anything left to describe. The screen always has an answer by the time it
+ * paints, which is the entire point of the change.
  *
  * **The outliers table is a list.** React Native has no `<table>`, and six columns do not
  * fit on a phone regardless. Each row keeps all six values: merchant and amount on the
@@ -51,18 +45,16 @@ import { MonthNav } from "@/components/filters";
 import type { IconName } from "@/components/Icon";
 import { Screen } from "@/components/Screen";
 import {
-  AiNotConfigured, Banner, Card, Chip, Dot, EmptyState, IconTile, LinkButton, Loading,
+  Banner, Card, Chip, Dot, EmptyState, IconTile, LinkButton,
   PageHead, ProgressBar, StatTile,
 } from "@/components/ui";
-import { cached } from "@/lib/ai/cache";
-import { aiConfigured } from "@/lib/ai/client";
-import {
-  generateInsights, type Insights as InsightsPayload, type InsightsBrief,
-} from "@/lib/ai/insights";
 import {
   burnForecast, flagOutliers, paceVsLastMonth, projectCashflow,
   type BurnForecast, type CashflowProjection,
 } from "@/lib/analytics/forecast";
+import {
+  writeInsights, type Insights as InsightsPayload, type InsightsBrief,
+} from "@/lib/analytics/narrative";
 import {
   CADENCE_LABEL, detectSubscriptions, type DetectedSubscription,
 } from "@/lib/analytics/subscriptions";
@@ -190,10 +182,12 @@ async function load(month: MonthKey): Promise<Loaded> {
       return {
         name: c.name,
         spent: fmtWhole(c.total_minor),
+        spentMinor: c.total_minor,
         limit: limit ? fmtWhole(limit.limit_minor) : null,
         usedPct:
           limit && limit.limit_minor > 0 ? Math.round(pct(c.total_minor, limit.limit_minor)) : null,
         lastMonth: last && last.prev_minor > 0 ? fmtWhole(last.prev_minor) : null,
+        lastMonthMinor: last && last.prev_minor > 0 ? last.prev_minor : null,
       };
     }),
     outliers: outliers.slice(0, 6).map((o) => ({
@@ -209,6 +203,7 @@ async function load(month: MonthKey): Promise<Loaded> {
       cadence: CADENCE_LABEL[s.cadence].toLowerCase(),
       typical: fmtWhole(s.typicalMinor),
       perYear: fmtWhole(s.annualCostMinor),
+      perYearMinor: s.annualCostMinor,
       note: s.priceIncrease
         ? `up from ${fmtWhole(s.priceIncrease.fromMinor)} (+${s.priceIncrease.pctChange}%)`
         : null,
@@ -217,16 +212,31 @@ async function load(month: MonthKey): Promise<Loaded> {
       ? {
           count: dueThisMonth.length,
           total: fmtWhole(dueThisMonth.reduce((s, b) => s + b.amount_minor, 0)),
+          totalMinor: dueThisMonth.reduce((s, b) => s + b.amount_minor, 0),
         }
       : null,
     goals: settings.monthly_goal_target_minor
-      ? { funded: fmtWhole(goalFunded), target: fmtWhole(settings.monthly_goal_target_minor) }
+      ? {
+          funded: fmtWhole(goalFunded),
+          target: fmtWhole(settings.monthly_goal_target_minor),
+          fundedPct: Math.round(pct(goalFunded, settings.monthly_goal_target_minor)),
+        }
       : null,
     invest: settings.monthly_invest_target_minor
-      ? { funded: fmtWhole(invested), target: fmtWhole(settings.monthly_invest_target_minor) }
+      ? {
+          funded: fmtWhole(invested),
+          target: fmtWhole(settings.monthly_invest_target_minor),
+          fundedPct: Math.round(pct(invested, settings.monthly_invest_target_minor)),
+        }
       : null,
     billCount: cats.reduce((s, c) => s + c.txn_count, 0),
     monthsOfHistory: span.months,
+
+    // Numbers rather than strings: ranking needs to compare, and the formatted fields
+    // above cannot be compared without parsing them back.
+    headroomMinor: burn.headroomMinor,
+    budgetUsedPct: budget > 0 ? Math.round(pct(spent, budget)) : null,
+    vsLastMonthPct: vsLast.deltaPct,
   };
 
   return {
@@ -270,11 +280,7 @@ export default function InsightsScreen() {
               </Card>
             ) : (
               <View style={s.stack}>
-                {aiConfigured() ? (
-                  <Narrative month={d.month} brief={d.brief} />
-                ) : (
-                  <AiNotConfigured feature="Written insights" />
-                )}
+                <Narrative brief={d.brief} />
 
                 <WhereItLands data={d} />
                 <Unusual outliers={d.outliers} />
@@ -317,68 +323,29 @@ const TONE_ICON: Record<InsightsPayload["observations"][number]["tone"], IconNam
 };
 
 /**
- * The AI summary, on its own load.
+ * The summary, with no key, no network and no cost.
  *
- * A failure here must not take the deterministic half of the screen with it, so the error
- * state is a banner rather than a thrown render. `cached` only fails outright when there is
- * nothing at all to fall back on — with a previous answer in the table it returns that,
- * plus the reason it is not current, which is the `staleReason` branch below.
+ * This is why the screen no longer has a "needs an API key" state. "Written insights need a
+ * key" was true of the prose and never of the reasoning: every figure the card quotes was
+ * computed on this phone, and ranking them is something code can do. The footer is honest
+ * about the limit — a rule cannot notice what no rule was written for — rather than hiding
+ * the card behind a setting.
  */
-function Narrative({ month, brief }: { month: MonthKey; brief: InsightsBrief }) {
+function Narrative({ brief }: { brief: InsightsBrief }) {
   const t = useTheme();
   const s = useStyles(styles);
-  const ai = useLive(
-    () => cached<InsightsPayload>("insights", month, brief, () => generateInsights(brief)),
-    [month],
-  );
-
-  const failed = ai.error;
-  if (failed) {
-    return (
-      <Banner tone="warn" icon="alert">
-        <Text style={s.strong}>Could not write the summary just now.</Text>
-        {"\n"}
-        {`${failed.message} Everything below is computed locally and is unaffected.`}
-      </Banner>
-    );
-  }
-
-  const hit = ai.data;
-  if (!hit) {
-    return (
-      <Card
-        title="Reading the figures"
-        note="Claude is being sent a summary of this month's own numbers"
-      >
-        <Loading label="Writing the summary…" />
-      </Card>
-    );
-  }
-
-  const ins = hit.value;
+  const ins = writeInsights(brief);
 
   return (
     <Card
       title={ins.headline}
-      note="Claude read the figures below and picked out what matters. Every number it quotes is one this app computed."
+      note="Ranked on this phone from the figures below. Nothing left the device to write it."
       action={
-        hit.staleReason ? (
-          <Chip tone="warn" icon="clock">{`from ${stamp(hit.at)}`}</Chip>
-        ) : (
-          <Chip tone="info" icon="sparkle">
-            AI summary
-          </Chip>
-        )
+        <Chip tone="neutral" icon="check">
+          Computed locally
+        </Chip>
       }
     >
-      {hit.staleReason ? (
-        <View style={s.staleWrap}>
-          <Banner tone="warn" icon="clock">
-            {`This is the last summary that came back, written ${stamp(hit.at)}. A fresh one failed: ${hit.staleReason}`}
-          </Banner>
-        </View>
-      ) : null}
-
       <View style={s.obsList}>
         {ins.observations.map((o, i) => (
           <View key={i} style={s.obs}>
@@ -420,7 +387,10 @@ function Narrative({ month, brief }: { month: MonthKey; brief: InsightsBrief }) 
       ) : null}
 
       <Text style={s.footNote}>
-        {`Written by ${hit.model ?? "Claude"} from a summary of your own figures — the amounts, dates and category totals on this screen. It is given no power to change anything.`}
+        Assembled by MoneyFit itself — the same figures you can read below, picked by rule. It
+        phrases things the same way every month and it will not spot anything a rule was not
+        written for, but every number in it is one this app computed, and none of it left the
+        phone.
       </Text>
     </Card>
   );
@@ -757,15 +727,6 @@ function toneColor(t: Theme, tone: InsightsPayload["observations"][number]["tone
   return t.c.blue;
 }
 
-/**
- * SQLite writes `ai_cache.created_at` as `'YYYY-MM-DD HH:MM:SS'` already, but a value that
- * came back from `new Date().toISOString()` has a T in it. Cutting at 16 characters leaves
- * the date and the minute either way.
- */
-function stamp(at: string): string {
-  return at.replace("T", " ").slice(0, 16);
-}
-
 const styles = (t: Theme) => ({
   /** `.stack` — the gap between cards. `Banner` has none of its own, hence the wrapper. */
   stack: { gap: space.gap + 4 } as ViewStyle,
@@ -774,7 +735,6 @@ const styles = (t: Theme) => ({
   bannerWrap: { marginTop: 18 } as ViewStyle,
 
   // ------------------------------------------------------------ the narrative
-  staleWrap: { marginBottom: 20 } as ViewStyle,
   obsList: { gap: 18 } as ViewStyle,
   obs: { flexDirection: "row", alignItems: "flex-start", gap: 14 } as ViewStyle,
   obsMain: { flex: 1, minWidth: 0 } as ViewStyle,

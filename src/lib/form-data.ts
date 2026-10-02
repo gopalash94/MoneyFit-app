@@ -37,7 +37,7 @@
  * `FormData` must import it from here**, actions and form components alike. There
  * is no way to make the compiler enforce that without dropping the DOM lib, which
  * would cost more than it saves (the `fetch`/`AbortController` types in
- * `lib/ai/client.ts` come from the same lib).
+ * `lib/ai/gemini.ts` come from the same lib).
  *
  * ### One type difference from the web
  *

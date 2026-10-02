@@ -17,8 +17,16 @@ ios/
 *.jks
 *.keystore
 
-# Local secrets. The Anthropic key is typed into Settings and kept in
-# expo-secure-store on the device — it must never reach a file in this tree.
+# pdf.js, copied out of node_modules by `npm run bundle-pdfjs` (which also runs from
+# postinstall). About 2.4 MB of minified JavaScript that npm can fetch, so committing
+# it would mean carrying it in every clone and letting it drift from the version
+# pinned in package.json. When pdfjs-dist is not installed the same script writes a
+# placeholder to both paths instead, so the import always leaves something here for
+# Metro to resolve — see assets/pdfjs/README.md.
+assets/pdfjs/*.pdfjs
+
+# Local secrets. The Gemini key is typed into Settings and kept in expo-secure-store
+# on the device — it must never reach a file in this tree.
 .env
 .env.local
 *.log

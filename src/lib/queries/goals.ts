@@ -64,16 +64,24 @@ export async function goalFundedInMonth(mk: MonthKey, startDay = 1): Promise<num
   return row?.total ?? 0;
 }
 
-/** Monthly totals for the goal-funding trend. */
+/**
+ * Monthly totals for the goal-funding trend.
+ *
+ * `to` is optional, and null means open-ended — see `queries/stats.ts`'s
+ * `cashflowByMonth` for why it exists and for the note on comparing ISO dates as
+ * strings. Every existing caller passes one argument and is unchanged.
+ */
 export async function goalFundingByMonth(
   from: ISODate,
+  to?: ISODate,
 ): Promise<{ month: MonthKey; total_minor: number }[]> {
   return q(
     `SELECT substr(txn_date, 1, 7) AS month,
             SUM(amount_minor)      AS total_minor
-     FROM goal_contributions WHERE txn_date >= ?1
+     FROM goal_contributions
+     WHERE txn_date >= ?1 AND (?2 IS NULL OR txn_date <= ?2)
      GROUP BY 1 ORDER BY 1`,
-    [from],
+    [from, to ?? null],
   );
 }
 
@@ -100,14 +108,15 @@ export async function goalCumulative(
  */
 export async function goalFundingRecent(
   from: ISODate,
+  to?: ISODate,
 ): Promise<{ goal_id: number; total_minor: number; months: number }[]> {
   return q(
     `SELECT goal_id,
             SUM(amount_minor)                      AS total_minor,
             count(DISTINCT substr(txn_date, 1, 7)) AS months
      FROM goal_contributions
-     WHERE txn_date >= ?1
+     WHERE txn_date >= ?1 AND (?2 IS NULL OR txn_date <= ?2)
      GROUP BY goal_id`,
-    [from],
+    [from, to ?? null],
   );
 }

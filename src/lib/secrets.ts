@@ -1,8 +1,8 @@
 /**
- * The Anthropic API key, on a device.
+ * The Gemini API key, on a device.
  *
- * On the web this file does not exist: the key is `ANTHROPIC_API_KEY` in `.env`,
- * read by the server, and the browser never sees it. A phone has no server and no
+ * On the web this file does not exist: the key is `GEMINI_API_KEY` in `.env`, read
+ * by the server, and the browser never sees it. A phone has no server and no
  * `.env`, so the key has to be *typed in* once and kept somewhere — and the one
  * place it must never be is the source tree or the bundle, both of which ship to
  * anyone who has the APK.
@@ -42,7 +42,21 @@ import * as SecureStore from "expo-secure-store";
  * Dots, dashes and underscores are the punctuation SecureStore permits in a key
  * name, so this is a legal identifier as well as a readable one.
  */
-const STORE_KEY = "moneyfit.anthropic.api.key";
+const STORE_KEY = "moneyfit.gemini.api.key";
+
+/**
+ * Where the Anthropic key used to live, kept only to be deleted.
+ *
+ * Renaming the store key is the right thing to do — a slot called
+ * `moneyfit.anthropic.api.key` holding a Google credential is a lie that whoever
+ * reads the keystore next has to untangle — but a rename orphans whatever is already
+ * in the old slot. An orphaned key is not harmless: it is a working credential,
+ * sitting in the keystore of a phone, that nothing in the app will ever use again
+ * and nothing in the UI will ever offer to remove. So `primeSecrets()` deletes it
+ * once, on the first launch after the upgrade, and this constant can go the next
+ * time this file is touched for any other reason.
+ */
+const LEGACY_STORE_KEY = "moneyfit.anthropic.api.key";
 
 /** The mirror. `null` means "no key"; `primed` distinguishes that from "not read yet". */
 let cache: string | null = null;
@@ -67,6 +81,17 @@ export async function primeSecrets(): Promise<void> {
     cache = null;
   }
   primed = true;
+
+  // After `primed`, so that whatever happens to the old slot cannot affect whether
+  // the app believes it has a key — the two are unrelated and should stay that way.
+  // A failure is swallowed for the same reason as the read above: there is nothing
+  // the person holding the phone could do about it, and the worst case is that the
+  // next launch tries again.
+  try {
+    await SecureStore.deleteItemAsync(LEGACY_STORE_KEY);
+  } catch {
+    // Already gone, which is the case on every launch but the first after upgrading.
+  }
 }
 
 /**
@@ -97,8 +122,11 @@ export async function getApiKey(): Promise<string | null> {
  * with a trailing newline more often than not and a key with whitespace on the end
  * fails authentication in a way that looks like a wrong key. Beyond that there is
  * no format check: a rejected key already produces one clear sentence from
- * `friendly()` ("The Anthropic API key was rejected"), whereas a prefix test here
- * would lock the app out of a key format that has not been invented yet.
+ * `statusError()` in `ai/gemini.ts` ("The Gemini API key was rejected"), whereas a
+ * prefix test here would lock the app out of a key format that has not been invented
+ * yet — and that is not hypothetical. Google AI Studio issued `AIza…` keys for
+ * years and now issues keys beginning `AQ.`, so a check written against the first
+ * form would have rejected the second.
  */
 export async function saveApiKey(raw: string): Promise<void> {
   const key = raw.trim();
@@ -128,8 +156,14 @@ export async function clearApiKey(): Promise<void> {
 
 /**
  * What Settings displays. Enough to recognise which key is stored, not enough to
- * use: the prefix is public (`sk-ant-api03-` is on every key Anthropic issues) and
- * four trailing characters identify it among the two or three a person might have.
+ * use: the first seven characters are a public prefix on every key Google AI Studio
+ * issues (`AIzaSy…` on the older form, `AQ.Ab8…` on the current one), and four
+ * trailing characters identify it among the two or three a person might have.
+ *
+ * The seven is unchanged from when this masked an `sk-ant-api03-` key, and still
+ * reveals only prefix either way — but it is a judgement, not a rule, so if a future
+ * key format carries entropy in its first seven characters this number has to come
+ * down with it.
  */
 export function maskApiKey(key: string): string {
   const k = key.trim();

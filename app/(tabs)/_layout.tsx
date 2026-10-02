@@ -8,7 +8,7 @@
  * on purpose sit behind the header button, exactly one tap further away. The tab
  * set is the `TABS` array below — reordering or swapping one is a one-line edit.
  *
- * Three things the sidebar did that are worth keeping:
+ * Four things the sidebar did that are worth keeping:
  *
  *   - **The brand is still the three rings.** `.brand` was a Logo plus the word,
  *     at 20px/500/-0.2; it is the header title here, at the same size.
@@ -16,6 +16,12 @@
  *     pill behind the active item without looking unlike every other Android app,
  *     so the tint carries it and the icon's stroke thickens from 1.8 to 2.2 — the
  *     same trick `.nav-item[data-active]` was doing with colour alone.
+ *   - **Journal carries a count of what is overdue.** `.nav-item .badge`, fed by
+ *     `countOverdue()`. This one was missed when the sidebar became a tab bar, and
+ *     `queries/bills.ts` has been carrying a doc comment promising "the badge on
+ *     the tab bar" ever since. It is the reason the tab shell reads from the
+ *     database at all: a number on a tab is the only thing in this app that tells
+ *     you something needs doing without being asked.
  *   - **The theme button stays in the top-right corner**, where `.theme-toggle`
  *     put it (`position: fixed; top: 22px; right: 30px`).
  *
@@ -39,7 +45,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Icon, Logo, type IconName } from "@/components/Icon";
 import type { LinkTarget } from "@/components/ui";
-import { bump } from "@/lib/live";
+import { bump, useLive } from "@/lib/live";
+import { countOverdue } from "@/lib/queries/bills";
 import { setSettings } from "@/lib/queries/settings";
 import { useStyles, useTheme, type Theme } from "@/theme/ThemeProvider";
 import { font, radius, space, weight } from "@/theme/tokens";
@@ -62,6 +69,18 @@ const TAB_BAR_H = 49;
 export default function TabsLayout() {
   const t = useTheme();
   const s = useStyles(styles);
+
+  // The badge's count. `useLive` rather than a one-shot read, because the number has to
+  // fall the moment a bill is marked paid — every write goes through an action that
+  // calls `refreshAll()`, which bumps the version this subscribes to, so the tab bar is
+  // refreshed by the same signal the lists are.
+  //
+  // `?? 0` covers both the first render and a failed read. The web wrote that as a
+  // `let overdue = 0` around a `try`/`catch` whose empty body said "left at the defaults
+  // on purpose": a database the shell cannot reach is reported by the screen inside it,
+  // which has room to explain, and not by a piece of chrome that can only be a number.
+  const overdue = useLive(() => countOverdue(), []).data ?? 0;
+
   return (
     // The navigator cannot have a non-Screen child, so the FAB is its sibling and
     // this wrapper is what they share. Last child, so it paints on top — `.fab`
@@ -95,6 +114,15 @@ export default function TabsLayout() {
               tabBarIcon: ({ color, focused }) => (
                 <Icon name={tab.icon} size={24} stroke={focused ? 2.2 : 1.8} color={color} />
               ),
+              // `{it.href === "/journal" && overdue > 0 && …}` on the web, and the same
+              // two conditions here — `undefined` is how this prop says "no badge", so
+              // a zero is not rendered as a nought. Written as a ternary inside the
+              // shared `options` rather than a branch around it, because every other
+              // option on every tab is identical and splitting the object to give one
+              // tab one extra line would hide that.
+              tabBarBadge:
+                tab.name === "journal" && overdue > 0 ? overdue : undefined,
+              tabBarBadgeStyle: s.badge,
             }}
           />
         ))}
@@ -254,6 +282,31 @@ const styles = (t: Theme) => ({
     letterSpacing: -0.2,
     color: t.c.text,
   } as const,
+
+  /**
+   * `.nav-item .badge` — the overdue count on the Journal tab.
+   *
+   * Four of the web's nine declarations are here and five are not, and the split is
+   * the point. `margin-left: auto` and `display: grid` placed the badge at the end of
+   * a sidebar row; the navigator places this one itself. `min-width: 18px; height:
+   * 18px; border-radius: 9px` is the pill, and React Navigation's badge already draws
+   * an 18px round one — so it is left alone rather than restated, because restating a
+   * height without the line height that centres a digit inside it is how you clip the
+   * digit.
+   *
+   * What is left is colour and size, and the colour is carrying the web's reason
+   * verbatim: *"Not #fff: --red is a deep red in light mode but a pale #f28b82 in dark,
+   * where white on it is 2.39:1 — a count you cannot read. --on-accent flips with the
+   * palette, which is exactly the flip this needs."* This is the most load-bearing use
+   * of `onAccent` in either codebase: on a button the token is a refinement, here it is
+   * the difference between a number and a smudge.
+   */
+  badge: {
+    backgroundColor: t.c.red,
+    color: t.c.onAccent,
+    fontSize: 11,
+    fontWeight: weight.semi,
+  } as TextStyle,
 
   actions: {
     flexDirection: "row",

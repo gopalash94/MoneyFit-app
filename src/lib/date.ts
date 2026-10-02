@@ -90,6 +90,35 @@ export function lastMonths(mk: MonthKey, n: number): MonthKey[] {
   return Array.from({ length: n }, (_, i) => addMonthKey(mk, i - (n - 1)));
 }
 
+/*
+ * Years are *calendar* years here, deliberately, even though a month can be
+ * salary-aligned through `settings.month_start_day`.
+ *
+ * Every per-month aggregate in the app groups on `substr(txn_date, 1, 7)`, so a year
+ * assembled out of those months is calendar by construction. Shifting the year
+ * boundary by the start day while the month rows stayed calendar would mean the twelve
+ * rows no longer added up to the figure printed above them — and a screen that
+ * disagrees with its own total is worse than one that is a few days out.
+ */
+
+export function thisYear(): number {
+  return Number(today().slice(0, 4));
+}
+
+export function yearOf(d: ISODate): number {
+  return Number(d.slice(0, 4));
+}
+
+/** Inclusive [Jan 1, Dec 31] of a calendar year. */
+export function yearBounds(year: number): { start: ISODate; end: ISODate } {
+  return { start: `${year}-01-01`, end: `${year}-12-31` };
+}
+
+/** All twelve month keys of a year, oldest first — the spine of the year table. */
+export function monthsOfYear(year: number): MonthKey[] {
+  return Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, "0")}`);
+}
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 

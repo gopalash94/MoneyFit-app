@@ -12,7 +12,7 @@
  *   TIMESTAMPTZ         → TEXT      (datetime('now') — UTC, as now() was)
  *   BOOLEAN             → INTEGER   0/1 — see the `b()` helper in lib/db.ts
  *   NUMERIC(20, 6)      → REAL      (units only; never an amount)
- *   JSONB               → TEXT      — so readCache must JSON.parse, and does
+ *   JSONB               → TEXT      — so queries/ask.ts must JSON.parse, and does
  *
  * Everything else survives: every CHECK, the partial index on upcoming bills,
  * the lower(merchant) expression index and the two-expression unique index on
@@ -21,8 +21,15 @@
  *
  * `AUTOINCREMENT` is deliberate rather than habit. Without it SQLite reuses the
  * highest deleted rowid, so deleting a bill and adding another could hand out
- * the id an `ai_cache` scope or a stale route param still refers to. With it,
- * ids are never reused.
+ * the id a stale route param still refers to. With it, ids are never reused.
+ *
+ * One place this file is *simpler* than the web's. `bills.holding_id` and
+ * `bills.statement_batch_id` are declared inline above, pointing at two tables
+ * created further down this same script. SQLite resolves a foreign key when a
+ * row is written, not when the table is declared, so a parent table may be
+ * created after its child. Postgres cannot do that, which is why the web app
+ * had to bolt both columns on afterwards in `db/070_statements.sql` and explain
+ * itself while doing it. Here they can simply be part of the table.
  */
 
 export const SCHEMA_SQL = `
@@ -55,7 +62,20 @@ CREATE TABLE bills (
   -- Set on an auto-generated next occurrence, pointing at the bill it came from.
   parent_bill_id INTEGER REFERENCES bills(id) ON DELETE SET NULL,
   -- Provenance: 'manual' or 'ai' when the fields came from bill extraction.
+  --
+  -- The web app dropped this column (\`db/060_drop_ai.sql\`) once it had no AI left
+  -- to set it to 'ai' — a column with one reachable value is not information. Here
+  -- it stays, because the camera scan stayed: on a phone it is the one input method
+  -- a desktop has no equivalent of, so 'ai' is still a value this column really
+  -- takes and still worth knowing months later.
   source         TEXT    NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai')),
+  -- Which account it was paid from. Optional, and ON DELETE SET NULL: closing a
+  -- bank account must not delete the history of what you spent through it.
+  holding_id     INTEGER REFERENCES holdings(id) ON DELETE SET NULL,
+  -- Which imported statement it arrived in, so a row you do not recognise later
+  -- can be traced back to the file. SET NULL for the same reason: deleting the
+  -- record of an import must not delete the bills it created.
+  statement_batch_id INTEGER REFERENCES statement_batches(id) ON DELETE SET NULL,
   created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -63,6 +83,9 @@ CREATE INDEX bills_txn_date_idx  ON bills (txn_date DESC);
 CREATE INDEX bills_category_idx  ON bills (category_id);
 CREATE INDEX bills_upcoming_idx  ON bills (status, due_date) WHERE status = 'upcoming';
 CREATE INDEX bills_merchant_idx  ON bills (lower(merchant));
+CREATE INDEX bills_holding_idx   ON bills (holding_id);
+CREATE INDEX bills_statement_batch_idx
+  ON bills (statement_batch_id) WHERE statement_batch_id IS NOT NULL;
 
 -- --------------------------------------------------------------- attachments
 -- Its own table, not a column on bills: a bill and its payment receipt are two
@@ -174,28 +197,142 @@ CREATE TABLE settings (
   value TEXT NOT NULL
 );
 
--- ------------------------------------------------------------------ ai_cache
--- AI answers are cached so opening Home does not bill an API call every time.
--- \`fingerprint\` is a hash of the inputs; a stale row is simply ignored.
--- \`payload\` was JSONB and is now TEXT, so writeCache stringifies and readCache
--- parses — the one place the port has to do work Postgres used to do.
-CREATE TABLE ai_cache (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind        TEXT NOT NULL,
-  scope       TEXT NOT NULL DEFAULT '',
-  fingerprint TEXT NOT NULL,
-  payload     TEXT NOT NULL,
-  model       TEXT,
-  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (kind, scope)
-);
-
 -- Subscriptions the statistical detector found that you have told it to stop
 -- suggesting. Keyed by the normalised merchant name it groups on.
 CREATE TABLE detection_dismissals (
   signature  TEXT PRIMARY KEY,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- -------------------------------------------------------------- scan_drafts
+-- A photographed bill that has been read but not yet confirmed.
+--
+-- This replaces the old general-purpose \`ai_cache\`, which was carrying two
+-- unrelated jobs: caching insight and coaching answers, and holding scan
+-- drafts. The first job is gone — both are computed locally now, in
+-- src/lib/analytics/ — so what is left is one narrow thing, named for it.
+--
+-- \`file_name\` is the key, and the key is the point. The draft carries across
+-- the navigation from the camera to the new-bill form without a route param
+-- big enough to hold it, and because the form reads the file metadata back
+-- from here rather than from its own state, the attachment a bill adopts
+-- cannot be swapped for a different file by editing the form.
+--
+-- No fingerprint column, unlike the cache it replaces. A fresh file name per
+-- photo means this row is written once and read once, so there is nothing for
+-- a freshness check to compare against.
+--
+-- \`payload\` is the ScanDraft as JSON — see getScanDraft in queries/scan.ts,
+-- which treats a row that will not parse as absent rather than as an error.
+CREATE TABLE scan_drafts (
+  file_name  TEXT PRIMARY KEY,
+  payload    TEXT NOT NULL,
+  model      TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- --------------------------------------------------------- statement_batches
+-- One row per statement file you imported — \`Finance/db/070_statements.sql\`.
+--
+-- Deliberately *not* a copy of the rows it contained: the parse is
+-- deterministic and the file is kept, so the review screen re-reads and
+-- re-parses it rather than storing a second version of the same facts that
+-- could drift from the first.
+--
+-- \`sha256\` is the whole point of the table. Statement ranges overlap — you
+-- import January to March, then February to April — and without a record of
+-- what has already been through, "have I imported this?" is unanswerable. The
+-- hash catches the same *file* twice; per-transaction duplicate detection
+-- (date + amount + merchant, against \`bills\`) catches the same *transaction*
+-- arriving in a different file, and the review screen shows both before
+-- anything is written.
+--
+-- \`committed_at\` is the one-way door. A batch that has been committed cannot
+-- be committed again, which is what stops a double-tap or a back-gesture from
+-- duplicating every bill in it.
+CREATE TABLE statement_batches (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- The stored file in the app's documents directory, or NULL once it has been
+  -- cleaned up. Not a foreign key into \`attachments\`: a statement covers many
+  -- bills and belongs to none of them.
+  file_name     TEXT,
+  original_name TEXT    NOT NULL,
+  mime_type     TEXT    NOT NULL,
+  size_bytes    INTEGER NOT NULL,
+  sha256        TEXT    NOT NULL UNIQUE,
+  page_count    INTEGER NOT NULL DEFAULT 0,
+  row_count     INTEGER NOT NULL DEFAULT 0,
+  added_count   INTEGER NOT NULL DEFAULT 0,
+  committed_at  TEXT,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX statement_batches_created_idx ON statement_batches (created_at DESC);
+
+-- ----------------------------------------------------------------- ask_turns
+-- The Ask thread: one row per question you have typed — \`db/080_ask.sql\`.
+--
+-- Why a table rather than React state. Three reasons, in order of weight:
+--
+--  1. **It is the audit log.** Ask is the only feature here that opens an
+--     outbound connection. \`question\` is the text that left this phone, and
+--     \`model\` is what it was sent to. Nothing else did. Figures never leave:
+--     the SQL comes back and is executed locally, on the query_only connection.
+--  2. A conversation held in component state is the one screen in the app that
+--     forgets itself when you navigate away — every other screen reads SQL.
+--  3. A wrong answer is worth keeping. \`sql_text\` is the model's working, and
+--     the only way to tell a bad question from a bad query is to read it.
+--
+-- Nothing here is a foreign key into anything. An answer is a snapshot of what
+-- the figures said when you asked, and editing a bill afterwards must not
+-- change what the thread claims was true — or quietly delete the question
+-- through a cascade.
+CREATE TABLE ask_turns (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  question     TEXT NOT NULL,
+  -- answered: rows came back. refused: the model would not write SQL for it, or
+  -- wrote something the validator rejected. failed: the network or the database
+  -- said no. All three are kept — "this went wrong" is part of the thread.
+  status       TEXT NOT NULL CHECK (status IN ('answered', 'refused', 'failed')),
+  -- The SELECT exactly as the model wrote it, before the row cap was wrapped
+  -- around it. Displayed, so an answer can always be checked rather than trusted.
+  sql_text     TEXT,
+  model        TEXT,
+  -- The model's own sentence when it declines, or the reason the attempt failed.
+  note         TEXT,
+  -- The next two have no counterpart in \`db/080_ask.sql\`, because the web's answer
+  -- is a sentence and a table and this one is richer: \`ai/sql.ts\` also gets back up
+  -- to three \`assumptions\` and an optional \`chart\`. Dropping them on the way into
+  -- the thread would have made the persisted answer poorer than the live one, and
+  -- then the screen would have needed two renderers — one for the turn you just
+  -- asked and one for every turn after a reload.
+  --
+  -- \`chart\` holds the *series*, not just the two column names the model chose:
+  -- \`{ kind, label, value, labels: string[], values: number[] }\`. It has to. The
+  -- rows beside it are rendered strings — "₹12,345" cannot be plotted — so a chart
+  -- rebuilt from them would be a chart of NaN. Storing the numbers makes the turn
+  -- self-contained, which is the same argument this table already makes for storing
+  -- rendered rows rather than re-running the query.
+  assumptions  TEXT,
+  chart        TEXT,
+  -- Column names in order, and the rows as arrays of rendered strings. These
+  -- were JSONB on Postgres and are TEXT holding JSON here, so recordTurn
+  -- stringifies and listTurns parses — see src/lib/queries/ask.ts.
+  --
+  -- Stored *rendered* because a column's type is a property of the query, not
+  -- of the app: the screen cannot know whether column 3 is money, a month or a
+  -- merchant, so formatting happens once, where the row is still next to its SQL.
+  result_cols  TEXT,
+  result_rows  TEXT,
+  row_count    INTEGER NOT NULL DEFAULT 0,
+  -- 1 when the query matched more rows than the cap, so the screen can say so
+  -- instead of silently showing a prefix as if it were the whole answer.
+  truncated    INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+  ms           INTEGER,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX ask_turns_created_idx ON ask_turns (created_at DESC);
 `;
 
 /**

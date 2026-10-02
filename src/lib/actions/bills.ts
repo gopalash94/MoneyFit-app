@@ -26,7 +26,7 @@
  * **Four dialect edits.** `$n` → `?n`; the new bill's id comes from
  * `lastInsertRowId` instead of `RETURNING id`; `CURRENT_DATE` → `date('now','localtime')`,
  * because SQLite's is UTC and a bill duplicated at 1am IST would land on yesterday;
- * and the claimed `ai_cache.payload` goes through `j()`, since that column is TEXT
+ * and the claimed `scan_drafts.payload` goes through `j()`, since that column is TEXT
  * here rather than `jsonb` with `pg` parsing it on the way out.
  *
  * Two statements deliberately keep `RETURNING` rather than taking the cheaper route,
@@ -78,6 +78,7 @@ export async function saveBill(
   const txn_date = reqDate(fd, "txn_date", errs, "Date");
   let due_date = optDate(fd, "due_date", errs, "Due date");
   const category_id = optInt(fd, "category_id");
+  const holding_id = optInt(fd, "holding_id");
   const notes = optStr(fd, "notes", 2000);
 
   // An upcoming bill with no due date cannot be chased, sorted or forecast, so
@@ -110,7 +111,7 @@ export async function saveBill(
       let adopted: SavedFile | null = null;
       if (scan && STORED_NAME.test(scan)) {
         const claim = await c.query<{ payload: string | null }>(
-          "DELETE FROM ai_cache WHERE kind = 'scan' AND scope = ?1 RETURNING payload",
+          "DELETE FROM scan_drafts WHERE file_name = ?1 RETURNING payload",
           [scan],
         );
         adopted = j<ScanDraft>(claim.rows[0]?.payload)?.file ?? null;
@@ -120,18 +121,19 @@ export async function saveBill(
       if (id === null) {
         const ins = await c.query(
           `INSERT INTO bills (merchant, amount_minor, txn_date, due_date, status, kind,
-                              category_id, notes, recurrence, source)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)`,
+                              category_id, notes, recurrence, holding_id, source)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)`,
           [merchant, amount_minor, txn_date, due_date, status, kind, category_id, notes, recurrence,
-           adopted ? "ai" : "manual"],
+           holding_id, adopted ? "ai" : "manual"],
         );
         rowId = ins.lastInsertRowId;
       } else {
         const row = await c.query(
           `UPDATE bills SET merchant=?2, amount_minor=?3, txn_date=?4, due_date=?5, status=?6,
-                            kind=?7, category_id=?8, notes=?9, recurrence=?10
+                            kind=?7, category_id=?8, notes=?9, recurrence=?10, holding_id=?11
            WHERE id=?1`,
-          [id, merchant, amount_minor, txn_date, due_date, status, kind, category_id, notes, recurrence],
+          [id, merchant, amount_minor, txn_date, due_date, status, kind, category_id, notes, recurrence,
+           holding_id],
         );
         if (row.rowCount === 0) throw new Error("That bill no longer exists.");
         rowId = id;
@@ -210,7 +212,7 @@ export async function markPaid(id: number): Promise<void> {
     const bill = await c.query<{
       due_date: string | null; txn_date: string; recurrence: Recurrence;
       merchant: string; amount_minor: number; kind: Kind; category_id: number | null;
-      notes: string | null;
+      notes: string | null; holding_id: number | null;
     }>(
       `UPDATE bills
           SET status = 'paid',
@@ -218,7 +220,8 @@ export async function markPaid(id: number): Promise<void> {
               -- original txn_date was only ever the date it was entered.
               txn_date = COALESCE(due_date, txn_date)
         WHERE id = ?1 AND status = 'upcoming'
-        RETURNING due_date, txn_date, recurrence, merchant, amount_minor, kind, category_id, notes`,
+        RETURNING due_date, txn_date, recurrence, merchant, amount_minor, kind, category_id,
+                  notes, holding_id`,
       [id],
     );
     const b = bill.rows[0];
@@ -234,10 +237,12 @@ export async function markPaid(id: number): Promise<void> {
     if (exists.rowCount) return;
 
     await c.query(
+      // The account carries forward: a card bill that recurs is still on that card.
       `INSERT INTO bills (merchant, amount_minor, txn_date, due_date, status, kind,
-                          category_id, notes, recurrence, parent_bill_id)
-       VALUES (?1,?2,?3,?3,'upcoming',?4,?5,?6,?7,?8)`,
-      [b.merchant, b.amount_minor, next, b.kind, b.category_id, b.notes, b.recurrence, id],
+                          category_id, notes, recurrence, parent_bill_id, holding_id)
+       VALUES (?1,?2,?3,?3,'upcoming',?4,?5,?6,?7,?8,?9)`,
+      [b.merchant, b.amount_minor, next, b.kind, b.category_id, b.notes, b.recurrence, id,
+       b.holding_id],
     );
   });
   refreshAll();
@@ -271,10 +276,12 @@ export async function deleteBill(id: number): Promise<void> {
  */
 export async function duplicateBill(id: number): Promise<number | null> {
   const row = await q1<{ id: number }>(
+    // `holding_id` is copied like every other field: a second payment on the same
+    // card is the overwhelmingly common reason to duplicate a bill at all.
     `INSERT INTO bills (merchant, amount_minor, txn_date, due_date, status, kind,
-                        category_id, notes, recurrence, source)
+                        category_id, notes, recurrence, holding_id, source)
      SELECT merchant, amount_minor, date('now','localtime'), NULL, 'paid', kind,
-            category_id, notes, 'none', 'manual'
+            category_id, notes, 'none', holding_id, 'manual'
        FROM bills WHERE id = ?1
      RETURNING id`,
     [id],

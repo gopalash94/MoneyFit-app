@@ -13,8 +13,9 @@
  *     existing call site can keep passing a boolean. Coming *out*, each query
  *     module maps its rows through `b()` rather than letting integers leak into
  *     the view layer, where `archived ? …` would be true for 0.
- *   - **JSON.** `ai_cache.payload` was `jsonb` and `pg` parsed it. It is TEXT
- *     now, so `readCache` calls `JSON.parse` — see the note on `j()`.
+ *   - **JSON.** `scan_drafts.payload` and `ask_turns.result_cols`/`result_rows`
+ *     were `jsonb` and `pg` parsed them. They are TEXT now, so their query
+ *     modules call `JSON.parse` — see the note on `j()`.
  *   - **Dates and bigints.** Nothing to do. The web app told `pg` to leave DATE
  *     and TIMESTAMPTZ as strings and to turn INT8 into a Number, which is
  *     exactly what SQLite does unasked: TEXT columns come back as strings and
@@ -269,11 +270,20 @@ export function b(v: unknown): boolean {
 /**
  * A JSONB column, now TEXT, as the object it used to arrive as.
  *
- * Only `ai_cache.payload` needs it. `pg` parsed jsonb on the way out and this is
- * the one place the port has to do work Postgres did for free. A row written by
- * a previous version — or by hand — that is not valid JSON returns null rather
- * than throwing, because a corrupt cache entry should mean a cache miss, not a
- * broken screen.
+ * Five columns need it, and they divide:
+ *
+ *   - `scan_drafts.payload`, `ask_turns.result_cols` and `ask_turns.result_rows` were
+ *     `jsonb` on Postgres with `pg` parsing them on the way out, and this is the one
+ *     place the port has to do work Postgres did for free.
+ *   - `ask_turns.assumptions` and `ask_turns.chart` have no Postgres ancestor at all.
+ *     They are the two columns the web's `ask_turns` does not have, because its Ask
+ *     never asked the model for either — so they arrive here as TEXT by design rather
+ *     than by translation, and they go through this for the same reason: a stored turn
+ *     is read back by a version of the app that may not be the one that wrote it.
+ *
+ * A row written by a previous version — or by hand — that is not valid JSON returns
+ * null rather than throwing, because a payload nothing can read should mean one
+ * missing draft, one blank result table or one absent chart, not a broken screen.
  */
 export function j<T>(v: unknown): T | null {
   if (v == null) return null;

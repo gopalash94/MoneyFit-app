@@ -236,7 +236,10 @@ function Invest({ data, showArchived }: { data: Loaded; showArchived: boolean })
               tone="amber"
               sub={
                 target > 0
-                  ? `${pct(investedThisMonth, target)}% of the ${fmtCompact(target)} monthly target`
+                  ? // `pct` returns the raw float on purpose, so that the callers wanting a
+                    // decimal place can have one. A whole number is right here, and without
+                    // the rounding this tile reads "61.24401913875598%".
+                    `${Math.round(pct(investedThisMonth, target))}% of the ${fmtCompact(target)} monthly target`
                   : "No monthly target set"
               }
             />

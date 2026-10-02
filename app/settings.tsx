@@ -39,7 +39,7 @@
  * with its colour dot — so each one renders its own error from the render prop.
  *
  * **The API key card is the one section with no web counterpart at all.** On the web the
- * Anthropic key is `ANTHROPIC_API_KEY` in `.env`, read by the server, and never a form
+ * Gemini key is `GEMINI_API_KEY` in `.env`, read by the server, and never a form
  * field; a phone has no `.env`, so it is typed in here and kept in the device keystore by
  * `lib/secrets.ts`. One property of a keystore shapes the whole card: what goes in cannot
  * be shown again. So the input is empty on every mount, the stored key appears only as
@@ -78,7 +78,7 @@ import {
 } from "@/components/form";
 import { Icon } from "@/components/Icon";
 import { Screen } from "@/components/Screen";
-import { Banner, Card, Chip, Dot, PageHead, StatTile } from "@/components/ui";
+import { Banner, Card, Chip, Dot, LinkButton, PageHead, StatTile } from "@/components/ui";
 import {
   clearAiKey,
   exportData,
@@ -113,10 +113,10 @@ type Loaded = {
   categories: CategoryAdmin[];
   counts: Counts;
   /**
-   * The stored Anthropic key, masked — `null` when none is stored.
+   * The stored Gemini key, masked — `null` when none is stored.
    *
    * The raw key is read here and discarded in the same expression. Nothing downstream
-   * ever holds it: `maskApiKey` returns `sk-ant-…a1b2`, which is enough to tell "a key
+   * ever holds it: `maskApiKey` returns `AQ.Ab8…a1b2`, which is enough to tell "a key
    * is set" from "the wrong key is set" and useless to anyone reading over your
    * shoulder. Putting the real value in a `defaultValue` would print it into the view
    * tree, which is the one thing this card must not do.
@@ -167,6 +167,7 @@ function Inner({ data }: { data: Loaded }) {
       />
       <View style={s.stack}>
         <Profile settings={settings} />
+        <WelcomeAgain />
         <Targets settings={settings} />
         <CategoryBudgets categories={categories} />
         <Categories categories={categories} />
@@ -329,6 +330,36 @@ function Profile({ settings }: { settings: Settings }) {
   );
 }
 
+/**
+ * The one way back to the greeting, and the reason `app/welcome.tsx` bothers to know
+ * whether you have been greeted already.
+ *
+ * On the web this link lives in a card called **Access**, whose copy is about Docker
+ * publishing the port on loopback only — there is no sign-in, and the fact that nobody
+ * else on the network can reach the app is a property of how it is run. None of that
+ * has a phone analogue: the database is a file in the app's sandbox and the operating
+ * system is the access control, so the card is this link and nothing else, with its own
+ * note saying what it is for.
+ *
+ * Label, icon and variant are the web's: *"See the welcome screen"*, `eye`, outline,
+ * small. `LinkButton` rather than a `Pressable`, because unlike the button on the screen
+ * itself this one only has to navigate — and arriving with something to go back to is
+ * what makes the greeting say "Back to the app" instead of "Start exploring".
+ */
+function WelcomeAgain() {
+  return (
+    <Card title="Welcome screen" note="The first thing the app shows when you open it.">
+      <LinkButton
+        href="/welcome"
+        label="See the welcome screen"
+        icon="eye"
+        variant="outline"
+        small
+      />
+    </Card>
+  );
+}
+
 const ordinal = (n: number) =>
   `${n}${
     n % 10 === 1 && n !== 11
@@ -485,7 +516,7 @@ function Categories({ categories }: { categories: CategoryAdmin[] }) {
 }
 
 /**
- * The Anthropic key — the only section here with no counterpart on the web.
+ * The Gemini key — the only section here with no counterpart on the web.
  *
  * Three things about it follow from the value being a secret in the device keystore
  * rather than a row in `settings`, and all three are visible in the markup:
@@ -503,14 +534,33 @@ function Categories({ categories }: { categories: CategoryAdmin[] }) {
  * **The submit label changes once a key is stored.** With nothing on screen to edit,
  * "Save" beside a mask reads like it would save the mask; "Replace key" says what
  * pressing it with something pasted actually does.
+ *
+ * ## What the copy says now, and why it is shorter
+ *
+ * It used to say *four* features needed a key. Two of them — the monthly insights and
+ * the goal coaching — are computed on the device now, by `analytics/narrative.ts` and
+ * `analytics/coaching.ts`, so they work with no key and no network and are not mentioned
+ * here any more. That leaves two, and this card is where a person decides whether to
+ * enable them, so it has to be honest about both of them rather than reassuring:
+ *
+ * - **Ask** sends the typed question and the *names* of the analytics views. No amount,
+ *   date or category total is ever in the request — the model writes a query and SQLite
+ *   runs it here.
+ * - **Snap a bill** sends the whole photo or PDF, which is the entire point of it and is
+ *   also the single largest thing this app ever transmits.
+ *
+ * The free-tier sentence is not a disclaimer, it is the fact that decides the feature:
+ * Google's free tier says the content may be reviewed by people and used to improve
+ * their models, and a receipt is not an abstract payload. The paid tier does not. Saying
+ * so here is cheaper than a person finding out later.
  */
 function AiKey({ mask }: { mask: string | null }) {
   const s = useStyles(styles);
 
   return (
     <Card
-      title="Anthropic API key"
-      note="Four features use it: reading a bill from a photo, the monthly insights, goal coaching, and asking a question in words."
+      title="Gemini API key"
+      note="Two features use it: asking a question in words, and reading a bill from a photo. Everything else works without one."
       action={
         mask ? (
           <Chip tone="good" icon="check" title="A key is stored on this device">
@@ -525,16 +575,27 @@ function AiKey({ mask }: { mask: string | null }) {
         <View style={s.prose}>
           <Text style={s.proseText}>
             The key is kept in this phone’s encrypted keystore rather than in the app’s files
-            or its database, and it is sent nowhere except Anthropic. Everything else in
-            MoneyFit — every chart, forecast and subscription detector — is computed on the
-            device and works without one.
+            or its database, and it is sent nowhere except Google. Everything else in
+            MoneyFit — every chart, forecast, insight and subscription detector — is computed
+            on the device and works without one.
           </Text>
           <Text style={s.proseText}>
             {"Create one at "}
-            <Text style={s.strong}>console.anthropic.com</Text>
+            <Text style={s.strong}>aistudio.google.com/apikey</Text>
             {
-              " under API keys. Usage is billed to that account, and the four features here are a handful of requests each rather than anything running in the background."
+              ". There is a free tier, which is what makes these two features free to use; usage beyond it is billed to that Google account. Both are a handful of requests, triggered by you, and nothing runs in the background."
             }
+          </Text>
+          <Text style={s.proseText}>
+            What actually leaves this phone: when you ask a question, the question itself and
+            the names of the tables it may read — never your amounts, dates or totals, because
+            the query runs here. When you scan a bill, the photo or PDF itself.
+          </Text>
+          <Text style={s.proseText}>
+            On Google’s <Text style={s.strong}>free</Text> tier, what you send may be read by
+            people and used to improve their models. That is their published policy, not a
+            guess, and it is worth knowing before you point a camera at a receipt. A paid key
+            is excluded from it.
           </Text>
         </View>
 
@@ -550,7 +611,10 @@ function AiKey({ mask }: { mask: string | null }) {
           >
             <TextField
               name="api_key"
-              placeholder="sk-ant-api03-…"
+              // Both forms Google AI Studio has issued, because a placeholder that showed
+              // only one would read as a format requirement. Nothing checks the prefix —
+              // `lib/secrets.ts` says why at length.
+              placeholder="AIzaSy… or AQ.Ab8…"
               secure
               autoCapitalize="none"
               maxLength={200}
@@ -563,7 +627,7 @@ function AiKey({ mask }: { mask: string | null }) {
             <DangerButton
               action={clearAiKey}
               label="Remove key"
-              confirm="Forget the stored key? The four AI features go back to asking for one. Nothing else changes and no data is deleted."
+              confirm="Forget the stored key? Ask and bill scanning go back to asking for one. Nothing else changes and no data is deleted."
             />
           </View>
         ) : null}

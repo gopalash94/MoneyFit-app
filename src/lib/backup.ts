@@ -27,11 +27,24 @@
  *
  * ## What travels, and what does not
  *
- * Eleven of the twelve tables. `ai_cache` is left out: it is derived data that
- * one API call regenerates, and its `scan` scopes name stored files that are not
- * in the backup, so a restored scan draft would point at nothing.
- * `detection_dismissals` *is* included — "stop suggesting this subscription" is
- * something you decided, not something computed.
+ * Thirteen of the fourteen tables. `scan_drafts` is the one left out, and it is
+ * left out for the same reason its predecessor `ai_cache` was: it is keyed by the
+ * name of a stored file, those files do not travel, so a restored draft would
+ * point at nothing. It is also the shortest-lived row in the database — a bill
+ * you photographed and have not confirmed yet — so what the exclusion costs is
+ * one un-reviewed photo.
+ *
+ * Everything else travels, including the three tables that are a record of a
+ * decision rather than a computation. `detection_dismissals` — "stop suggesting
+ * this subscription" — is something you decided. `statement_batches` is the
+ * `sha256` ledger that answers "have I imported this file before?", and a restore
+ * that dropped it would silently make every statement importable a second time —
+ * though its `file_name` is blanked on the way in, because the statement file is
+ * one of the files that did not travel and the schema already spells NULL as
+ * "that file is gone". `ask_turns` is the audit log of the only feature here
+ * that opens an outbound connection; it cannot be recomputed, because the answer
+ * it holds is a snapshot of what the figures said on the day, and it is the last
+ * thing that should quietly disappear in a restore.
  *
  * **Attachment files do not travel.** Base64 of every photo and PDF would mean
  * building one JavaScript string holding the lot, and on a mid-range Android
@@ -136,6 +149,29 @@ const TABLES: readonly TableSpec[] = [
     ],
   },
   {
+    // Before `bills`, which references it. The order is cosmetic — see
+    // `defer_foreign_keys` in the header — but `bills` referencing something
+    // listed after it reads like an oversight, and this one need not.
+    table: "statement_batches",
+    key: "id",
+    cols: [
+      { name: "id", type: "int" },
+      // NULL once the stored file has been cleaned up, and NULL after a restore
+      // for every row, because the files themselves do not travel. The `sha256`
+      // is what the table is for and it survives regardless.
+      { name: "file_name", type: "text", null: true },
+      { name: "original_name", type: "text" },
+      { name: "mime_type", type: "text" },
+      { name: "size_bytes", type: "int" },
+      { name: "sha256", type: "text" },
+      { name: "page_count", type: "int" },
+      { name: "row_count", type: "int" },
+      { name: "added_count", type: "int" },
+      { name: "committed_at", type: "text", null: true },
+      { name: "created_at", type: "text" },
+    ],
+  },
+  {
     table: "bills",
     key: "id",
     cols: [
@@ -151,6 +187,11 @@ const TABLES: readonly TableSpec[] = [
       { name: "recurrence", type: "text" },
       { name: "parent_bill_id", type: "int", null: true },
       { name: "source", type: "text" },
+      // `holdings` is still listed after this table, so this one reference does
+      // lean on `defer_foreign_keys` — the same thing `parent_bill_id` already
+      // leans on, and moving `holdings` up would only move the problem.
+      { name: "holding_id", type: "int", null: true },
+      { name: "statement_batch_id", type: "int", null: true },
       { name: "created_at", type: "text" },
     ],
   },
@@ -262,6 +303,31 @@ const TABLES: readonly TableSpec[] = [
       { name: "created_at", type: "text" },
     ],
   },
+  {
+    // Last, and referenced by nothing — deliberately, see the table's comment in
+    // `db/schema.ts`. An answer is a snapshot of what the figures said when you
+    // asked, so editing a bill afterwards must not change what the thread claims
+    // was true, or delete the question through a cascade.
+    table: "ask_turns",
+    key: "id",
+    cols: [
+      { name: "id", type: "int" },
+      { name: "question", type: "text" },
+      { name: "status", type: "text" },
+      { name: "sql_text", type: "text", null: true },
+      { name: "model", type: "text", null: true },
+      { name: "note", type: "text", null: true },
+      // JSON in a TEXT column. Exported and restored as the string it is: this
+      // module never parses a payload, which is also what stops a hand-edited
+      // file's object from reaching a generated statement.
+      { name: "result_cols", type: "text", null: true },
+      { name: "result_rows", type: "text", null: true },
+      { name: "row_count", type: "int" },
+      { name: "truncated", type: "int" },
+      { name: "ms", type: "int", null: true },
+      { name: "created_at", type: "text" },
+    ],
+  },
 ];
 
 /** The one table the import skips. The header says why. */
@@ -271,9 +337,15 @@ const SKIP_RESTORE: readonly string[] = ["attachments"];
  * Children first, and longer than `sample-data.ts`'s `WIPE_ORDER` by three:
  * `categories` and `settings`, because the backup brings its own and keeping the
  * current ones would leave a bill pointing at a category that is not the one it
- * was filed under; and `ai_cache`, which is not restored but must still go,
- * because insights and coaching cached against the old numbers would be served
- * as if they described the new ones.
+ * was filed under; and `scan_drafts`, which is not restored but must still go,
+ * because a draft keyed on a file this phone no longer has would be offered on
+ * the new-bill form forever.
+ *
+ * Every table is here, including the two the backup does restore but whose rows
+ * must not survive a replace: a `statement_batches` row from before the restore
+ * would claim a `sha256` the restored `bills` know nothing about, and an
+ * `ask_turns` row would put an answer about the old figures in the same thread as
+ * the new ones.
  *
  * With `defer_foreign_keys` on, the order no longer has to be right — listing it
  * anyway costs nothing and does not depend on a PRAGMA having taken.
@@ -287,7 +359,9 @@ const CLEAR_ORDER: readonly string[] = [
   "valuations",
   "holdings",
   "budgets",
-  "ai_cache",
+  "statement_batches",
+  "ask_turns",
+  "scan_drafts",
   "detection_dismissals",
   "settings",
   "categories",
@@ -295,8 +369,8 @@ const CLEAR_ORDER: readonly string[] = [
 
 /**
  * Every table declared `AUTOINCREMENT`, which is every one with an `INTEGER
- * PRIMARY KEY` — `settings` and `detection_dismissals` have TEXT keys and never
- * appear in `sqlite_sequence`.
+ * PRIMARY KEY` — `settings`, `detection_dismissals` and `scan_drafts` have TEXT
+ * keys and never appear in `sqlite_sequence`.
  *
  * Clearing these is all the sequence handling the import needs: inserting an
  * explicit rowid higher than the stored value raises it, so after a restore the
@@ -311,7 +385,8 @@ const CLEAR_SEQUENCES: readonly string[] = [
   "valuations",
   "holdings",
   "budgets",
-  "ai_cache",
+  "statement_batches",
+  "ask_turns",
   "categories",
 ];
 
@@ -659,8 +734,13 @@ function cell(
 
 /**
  * The one transaction: defer the foreign keys, clear everything, insert
- * everything, and hand back the file names of the attachments that just went so
- * the caller can delete them once this has committed.
+ * everything, and hand back the file names of the stored files that just lost
+ * their rows, so the caller can delete them once this has committed.
+ *
+ * Three tables name a file and all three are read, for the same reason
+ * `wipeAll()` reads all three: the restored `statement_batches` rows carry their
+ * `file_name` across but the files do not, and a `scan_drafts` row is not
+ * restored at all, so both leave bytes behind unless they are collected here.
  *
  * A failure at COMMIT is almost always a foreign key that does not resolve —
  * SQLite reports deferred violations there, by which point nothing it names is
@@ -676,7 +756,15 @@ async function restore(prepared: readonly Prepared[]): Promise<string[]> {
       // statement while still refusing a parent that is not in the file at all.
       await c.query("PRAGMA defer_foreign_keys = ON");
 
-      const { rows } = await c.query<{ file_name: string }>("SELECT file_name FROM attachments");
+      // UNION rather than UNION ALL, so a name held by two tables is unlinked
+      // once. See `wipeAll()`, which does the same read for the same reason.
+      const { rows } = await c.query<{ file_name: string }>(
+        `SELECT file_name FROM attachments
+         UNION
+         SELECT file_name FROM statement_batches WHERE file_name IS NOT NULL
+         UNION
+         SELECT file_name FROM scan_drafts`,
+      );
 
       for (const table of CLEAR_ORDER) await c.query(`DELETE FROM ${table}`);
 
@@ -694,6 +782,14 @@ async function restore(prepared: readonly Prepared[]): Promise<string[]> {
       }
 
       for (const p of prepared) await insertRows(c, p);
+
+      // The one column the restore blanks rather than trusts. A batch's
+      // `file_name` is carried through the format so the export is a complete
+      // record, but the file itself did not travel, and the schema already
+      // spells NULL as "the stored file is gone" — which, on this phone, it is.
+      // Leaving the name would point the review screen at nothing; nulling it
+      // keeps the `sha256`, which is the part worth restoring.
+      await c.query("UPDATE statement_batches SET file_name = NULL");
 
       return rows.map((r) => r.file_name);
     });

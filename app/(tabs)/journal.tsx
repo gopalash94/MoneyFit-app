@@ -2,8 +2,8 @@
  * Journal — `Finance/src/app/journal/page.tsx`.
  *
  * Every bill, grouped by the day it belongs to, with the month switcher, the status
- * tabs, the filter row and a per-day total. The five reads of the web page's query
- * string become five reads of the route's params, and everything downstream of them —
+ * tabs, the filter row and a per-day total. The six reads of the web page's query
+ * string become six reads of the route's params, and everything downstream of them —
  * the `/^\d{4}-\d{2}$/` month guard, the `Number(sp.cat) > 0` test, the "a search is a
  * search of everything" rule that drops the month scope — is the web's code unchanged.
  *
@@ -45,8 +45,18 @@
  * ordering and its own reasoning: scanning is the faster path when you have the file to
  * hand, and the wrong one when you do not. `/bill/scan` explains itself when there is no
  * API key, so the button needs no condition here.
+ *
+ * **Where a statement import lands.** `commitStatement` sends you here with `added` and
+ * `skipped`, exactly as the web's `/journal?added=5&skipped=1` did, and the banner below
+ * is the web's. One difference, and it is forced: a browser's query string is replaced by
+ * the next navigation, but a route's params are *merged* by `setParams` — so left alone,
+ * `added` would survive a month change and the banner would sit there congratulating you
+ * on an import you did two screens ago. The counts are therefore read once into state and
+ * cleared off the route immediately. The effect is the web's: the message survives a
+ * refresh of this screen, and says nothing when the screen is reached any other way.
  */
 
+import { useEffect, useState } from "react";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 import type { TextStyle, ViewStyle } from "react-native";
@@ -55,15 +65,16 @@ import { MonthNav, Tabs, useSetParams } from "@/components/filters";
 import { ActionButton, Form, FormActions, Select, Submit, TextField } from "@/components/form";
 import { catIcon } from "@/components/Icon";
 import { Screen } from "@/components/Screen";
-import { Card, Chip, EmptyState, IconTile, LinkButton, PageHead } from "@/components/ui";
+import { Banner, Card, Chip, EmptyState, IconTile, LinkButton, PageHead } from "@/components/ui";
 import { optInt, optStr, pick } from "@/lib/actions/shared";
 import { fmtDayHeading, fmtDue, fmtMonth, thisMonth, type ISODate } from "@/lib/date";
 import { useLive } from "@/lib/live";
 import { fmtWhole } from "@/lib/money";
 import { getCategories, listBills } from "@/lib/queries/bills";
+import { listPaymentAccounts } from "@/lib/queries/holdings";
 import { getSettings } from "@/lib/queries/settings";
 import { RECURRENCE_LABEL } from "@/lib/recurrence";
-import type { BillRow, BillStatus, Category } from "@/lib/types";
+import type { BillRow, BillStatus, Category, PaymentAccount } from "@/lib/types";
 import { useStyles, type Theme } from "@/theme/ThemeProvider";
 import { font, radius, space, tnum, weight } from "@/theme/tokens";
 
@@ -81,14 +92,15 @@ type Filters = {
   status: BillStatus | null;
   kind: "expense" | "income" | null;
   catId: number | null;
+  accId: number | null;
   q: string;
 };
 
-type Loaded = { bills: BillRow[]; categories: Category[] };
+type Loaded = { bills: BillRow[]; categories: Category[]; accounts: PaymentAccount[] };
 
 async function load(f: Filters): Promise<Loaded> {
   const settings = await getSettings();
-  const [bills, categories] = await Promise.all([
+  const [bills, categories, accounts] = await Promise.all([
     listBills({
       // A search is a search of everything — scoping it to one month is the single
       // most annoying way to build a search box.
@@ -98,11 +110,13 @@ async function load(f: Filters): Promise<Loaded> {
       categoryId: f.catId,
       kind: f.kind,
       status: f.status,
+      holdingId: f.accId,
       limit: 400,
     }),
     getCategories(),
+    listPaymentAccounts(),
   ]);
-  return { bills, categories };
+  return { bills, categories, accounts };
 }
 
 export default function JournalScreen() {
@@ -117,30 +131,54 @@ export default function JournalScreen() {
   const rawKind = str(sp.kind);
   const kind = rawKind === "income" || rawKind === "expense" ? rawKind : null;
   const catId = Number(str(sp.cat)) > 0 ? Number(str(sp.cat)) : null;
+  const accId = Number(str(sp.acc)) > 0 ? Number(str(sp.acc)) : null;
   const q = str(sp.q).trim();
 
   const searching = q.length > 0;
 
-  // Five primitives, always five — `useLive` re-runs its effect on this list and
-  // React requires a stable length.
+  // Where a statement import lands — see the header. The counts are read off the route
+  // into state and then cleared from it, which is a one-way door: `landed` is set by the
+  // import that caused it and by nothing else afterwards.
+  //
+  // An effect rather than a `useState` initialiser, because this is a tab: the screen is
+  // already mounted when `commitStatement` navigates here, so an initialiser would have
+  // run long before the counts existed. The guard is `rawAdded <= 0`, and clearing the
+  // params makes it true, so this runs exactly once per import.
+  //
+  // `setParams` is deliberately not a dependency: `useSetParams` returns a fresh closure
+  // on every render, so listing it would mean "run every render" — which the guard would
+  // survive, but which says the wrong thing about when this is meant to fire.
+  const [landed, setLanded] = useState<{ added: number; skipped: number } | null>(null);
+  const rawAdded = Math.max(0, Number(str(sp.added)) || 0);
+  const rawSkipped = Math.max(0, Number(str(sp.skipped)) || 0);
+  useEffect(() => {
+    if (rawAdded <= 0) return;
+    setLanded({ added: rawAdded, skipped: rawSkipped });
+    setParams({ added: "", skipped: "" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawAdded, rawSkipped]);
+
+  // Six primitives, always six — `useLive` re-runs its effect on this list and
+  // React requires a stable length. `added` and `skipped` are not among them: they
+  // change what is *said* above the list, never which rows are in it.
   const live = useLive(
-    () => load({ month: monthKey, status, kind, catId, q }),
-    [monthKey, status ?? "", kind ?? "", catId ?? 0, q],
+    () => load({ month: monthKey, status, kind, catId, accId, q }),
+    [monthKey, status ?? "", kind ?? "", catId ?? 0, accId ?? 0, q],
   );
 
   const s = useStyles(styles);
 
   return (
     <Screen live={live}>
-      {({ bills, categories }) => {
+      {({ bills, categories, accounts }) => {
         const groups = groupByDay(bills);
         const expense = sum(bills, "expense");
         const income = sum(bills, "income");
         // `status` counts here, as it did on the web: with the Upcoming tab on and
         // nothing upcoming, "nothing matches those filters" is the true sentence.
-        const filtered = Boolean(q || catId || kind || status);
-        // The Clear button owns three of those four, so it appears for three of them.
-        const rowFiltered = Boolean(q || catId || kind);
+        const filtered = Boolean(q || catId || kind || status || accId);
+        // The Clear button owns four of those five, so it appears for four of them.
+        const rowFiltered = Boolean(q || catId || kind || accId);
 
         return (
           <>
@@ -153,9 +191,39 @@ export default function JournalScreen() {
               }
             >
               {searching ? null : <MonthNav month={monthKey} />}
+              {/* The web's order was MonthNav → Import → Add, and Import keeps its place
+                  in it: it goes before Scan rather than between Scan and Add, so that
+                  "Scan sits to the left of Add" above stays true of the row as built.
+                  Four controls fit because `pageHeadRow` wraps — at 360dp this becomes
+                  two lines rather than three squeezed buttons. */}
+              <LinkButton
+                href="/statement"
+                label="Import a statement"
+                icon="upload"
+                variant="outline"
+                small
+              />
               <LinkButton href="/bill/scan" label="Scan" icon="sparkle" variant="outline" small />
               <LinkButton href="/bill/new" label="Add bill" icon="plus" small />
             </PageHead>
+
+            {/* The web's import banner, unchanged in wording. `Banner` puts a single
+                `<Text>` around its children, so the `<strong>` is a nested one. */}
+            {landed ? (
+              <View style={s.landed}>
+                <Banner tone="good" icon="check">
+                  <Text style={s.landedStrong}>
+                    {`${landed.added} ${landed.added === 1 ? "row" : "rows"} added from your statement.`}
+                  </Text>
+                  {" "}
+                  {landed.skipped > 0
+                    ? `${landed.skipped} ticked row${
+                        landed.skipped === 1 ? "" : "s"
+                      } could not be added — each needs a date, an amount and a name.`
+                    : "Every row you ticked went in."}
+                </Banner>
+              </View>
+            ) : null}
 
             <View style={s.tabsWrap}>
               <Tabs
@@ -170,15 +238,19 @@ export default function JournalScreen() {
             </View>
 
             <Form
-              key={`${q}|${catId ?? ""}|${kind ?? ""}`}
+              key={`${q}|${catId ?? ""}|${kind ?? ""}|${accId ?? ""}`}
               style={s.toolbar}
               action={async (_prev, fd) => {
                 const nextCat = optInt(fd, "cat");
                 const nextKind = pick(fd, "kind", KINDS);
+                const nextAcc = optInt(fd, "acc");
                 setParams({
                   q: optStr(fd, "q", 120) ?? undefined,
                   cat: nextCat ? String(nextCat) : undefined,
                   kind: nextKind || undefined,
+                  // Undefined when the picker is not on screen at all, which is the
+                  // same thing it means when the picker is on screen set to "All".
+                  acc: nextAcc ? String(nextAcc) : undefined,
                 });
                 return null;
               }}
@@ -208,11 +280,32 @@ export default function JournalScreen() {
                 </View>
               </View>
 
+              {/* Only once there is something to filter by. An import stamps its
+                  account onto every bill it creates, which is what makes this worth
+                  having — by hand the field is usually left blank.
+
+                  Its own row rather than a third cell beside the other two: three
+                  selects across 360dp would truncate all three to nothing, and an
+                  account name is the longest of the three. */}
+              {accounts.length > 0 ? (
+                <Select
+                  name="acc"
+                  label="Account"
+                  defaultValue={accId ? String(accId) : ""}
+                  options={[
+                    { value: "", label: "All accounts" },
+                    ...accounts.map((a) => ({ value: String(a.id), label: a.name })),
+                  ]}
+                />
+              ) : null}
+
               <FormActions>
                 {rowFiltered ? (
                   <ActionButton
                     variant="ghost"
-                    action={async () => setParams({ q: undefined, cat: undefined, kind: undefined })}
+                    action={async () =>
+                      setParams({ q: undefined, cat: undefined, kind: undefined, acc: undefined })
+                    }
                   >
                     Clear
                   </ActionButton>
@@ -309,7 +402,7 @@ function Entry({ bill: b }: { bill: BillRow }) {
             </Chip>
           ) : null}
           {b.source === "ai" ? (
-            <Chip icon="sparkle" title="Extracted from an upload by Claude">
+            <Chip icon="sparkle" title="Extracted from an upload by Gemini">
               AI
             </Chip>
           ) : null}
@@ -362,6 +455,11 @@ function dayTotal(rows: BillRow[]): string {
 
 const styles = (t: Theme) => ({
   tabsWrap: { marginBottom: space.gap } as ViewStyle,
+
+  /** The web's `<div style={{ marginBottom: 20 }}>` around the import banner. */
+  landed: { marginBottom: 20 } as ViewStyle,
+  /** Its `<strong>`. Colour is inherited from the banner; only the weight is ours. */
+  landedStrong: { fontWeight: weight.semi } as TextStyle,
 
   // `.toolbar` — `gap: 10px; margin-bottom: 18px`, stacked rather than wrapped.
   toolbar: { gap: space.gapSm, marginBottom: 18 } as ViewStyle,

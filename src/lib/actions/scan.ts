@@ -1,20 +1,26 @@
 /**
- * Reading a bill with Claude, and throwing the resulting draft away —
+ * Reading a bill with Gemini, and throwing the resulting draft away —
  * `Finance/src/lib/actions/scan.ts`.
  *
  * **Both halves are here now.** This file held only `discardScan` until phase 11,
- * because `scanBill` needs `aiConfigured`, `AiError`, `writeCache` and `extractBill`,
- * and none of those existed yet. The promise made then is kept: the names, the
+ * because `scanBill` needs `aiConfigured`, `AiError` and `extractBill`, and none of
+ * those existed yet. The promise made then is kept: the names, the
  * signatures and the error sentences of both functions are the web's. Exactly one
- * sentence had to change — the missing-key one, which used to say "Set
- * ANTHROPIC_API_KEY in .env, then restart the stack" and now names Settings, because
- * that is where the key lives on a phone.
+ * sentence had to change — the missing-key one, which used to say "Set the API key in
+ * .env, then restart the stack" and now names Settings, because that is where the key
+ * lives on a phone.
+ *
+ * Two sentences changed again when the provider did, and both are about what can be
+ * sent rather than about who sends it: the missing-key line names Gemini, and the
+ * unreadable-type line no longer offers GIF, which is not among the image types Gemini
+ * accepts. A GIF is still perfectly attachable to a bill typed in by hand — see
+ * `isAiReadable` in `upload-meta.ts` for why those two lists differ on purpose.
  *
  * `scanBill`'s shape is the web's step for step, and the order of the steps is the
  * design: validate before any bytes move, save the file *before* calling the API, read
  * it back as base64, ask for the fields, turn the category *name* into an id here, and
- * write the result to `ai_cache` as a draft. Nothing is ever saved as a bill without a
- * person looking at it — the draft lands on the ordinary new-bill form with the fields
+ * write the result to `scan_drafts` as a draft. Nothing is ever saved as a bill without
+ * a person looking at it — the draft lands on the ordinary new-bill form with the fields
  * filled in and the confidence stated.
  *
  * Four edits, all forced by the platform and none of them touching that order:
@@ -49,15 +55,14 @@
  * destination, chosen by the thing that owns the router.
  *
  * What did *not* change is the order of the three steps, and it matters: the draft is
- * read before anything is deleted, the file is unlinked before the cache row goes, and
+ * read before anything is deleted, the file is unlinked before the draft row goes, and
  * the unlink is `.catch(() => {})` because a missing file must not leave the row behind
  * to be re-offered forever. The `STORED_NAME` gate is the same one `getScanDraft` and
- * `saveBill`'s claim use — a hand-edited scope can only ever name a draft that does
- * not exist.
+ * `saveBill`'s claim use — a hand-edited file name can only ever name a draft that
+ * does not exist.
  */
 
-import { writeCache } from "@/lib/ai/cache";
-import { aiConfigured, AiError } from "@/lib/ai/client";
+import { aiConfigured, AiError } from "@/lib/ai/gemini";
 import { extractBill } from "@/lib/ai/extract";
 import { today } from "@/lib/date";
 import { q } from "@/lib/db";
@@ -78,7 +83,7 @@ import { fail, pickedFiles, refreshAll, type FormState } from "./shared";
  */
 export async function scanBill(_prev: FormState, fd: FormData): Promise<FormState> {
   if (!aiConfigured()) {
-    return fail("Reading bills needs an Anthropic API key. Add one in Settings, then try again.");
+    return fail("Reading bills needs a Gemini API key. Add one in Settings, then try again.");
   }
 
   const file = pickedFiles(fd)[0];
@@ -88,7 +93,7 @@ export async function scanBill(_prev: FormState, fd: FormData): Promise<FormStat
     return fail(
       file.mimeType === "image/heic"
         ? "HEIC photos can be stored but not read. Share it as JPEG, or add the bill by hand."
-        : "That file type cannot be read. Use a PNG, JPEG, WebP, GIF or PDF.",
+        : "That file type cannot be read. Use a PNG, JPEG, WebP or PDF.",
       { files: "Unsupported type." },
     );
   }
@@ -145,7 +150,17 @@ export async function scanBill(_prev: FormState, fd: FormData): Promise<FormStat
       caveat: x.caveat,
     };
 
-    await writeCache("scan", saved.file_name, "", draft, model);
+    // `saveUpload` generates a fresh name per file, so the conflict clause can only
+    // fire when the same stored file is scanned twice — a retry, where overwriting
+    // the older draft is exactly what is wanted.
+    await q(
+      `INSERT INTO scan_drafts (file_name, payload, model) VALUES (?1, ?2, ?3)
+       ON CONFLICT (file_name) DO UPDATE SET
+         payload    = excluded.payload,
+         model      = excluded.model,
+         created_at = datetime('now')`,
+      [saved.file_name, JSON.stringify(draft), model],
+    );
 
     return { scan: saved.file_name };
   } catch (e) {
@@ -185,7 +200,7 @@ export async function discardScan(fileName: string): Promise<void> {
   if (STORED_NAME.test(fileName)) {
     const draft = await getScanDraft(fileName);
     if (draft) await deleteUpload(draft.file.file_name).catch(() => {});
-    await q("DELETE FROM ai_cache WHERE kind = 'scan' AND scope = ?1", [fileName]);
+    await q("DELETE FROM scan_drafts WHERE file_name = ?1", [fileName]);
   }
   refreshAll();
 }

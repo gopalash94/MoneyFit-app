@@ -112,7 +112,7 @@ import { addDays, fmtDate, today as todayIso } from "@/lib/date";
 import type { PickedFile } from "@/lib/files";
 import { FormData, type FormValue } from "@/lib/form-data";
 import { fmt, parseAmount, toInput } from "@/lib/money";
-import type { Category } from "@/lib/types";
+import { ASSET_TYPE_LABEL, type Category, type PaymentAccount } from "@/lib/types";
 import { MAX_UPLOAD_BYTES, fmtBytes, isImage } from "@/lib/upload-meta";
 import { useStyles, useTheme, type Theme } from "@/theme/ThemeProvider";
 import { font, radius, tnum } from "@/theme/tokens";
@@ -845,6 +845,64 @@ export function Select<T extends string>({
   );
 }
 
+// ========================================================== AccountSelect
+
+/**
+ * "Paid from" — which card, wallet or loan a bill came off.
+ *
+ * The web's version is a bare `<select>` with an empty first `<option>`; this is
+ * `Select` with the same first row, because everything interesting about it is the
+ * value it submits rather than how it looks.
+ *
+ * Two details are load-bearing and neither is obvious:
+ *
+ *   - **The empty value is the string `""`, and the ids are stringified.** `Select`
+ *     is generic over `T extends string` and `FormData` carries strings either way,
+ *     so there is nothing to convert on the way in. On the way out `optInt` turns
+ *     `""` into `null` — `Number("")` is 0, which fails its `n > 0` test — which is
+ *     exactly what the web's `<option value="">` produced.
+ *   - **No accounts means no field, not an empty one.** A picker whose only choice is
+ *     "none" is a question with no answer, so it says where to go instead. The web
+ *     renders the same sentence in a `.hint` div; `Field` already styles its `hint`
+ *     the same way, so this returns the `Text` and lets the caller's `Field` frame it.
+ */
+export function AccountSelect({
+  accounts,
+  name = "holding_id",
+  defaultId,
+}: {
+  accounts: PaymentAccount[];
+  name?: string;
+  defaultId?: number | null;
+}) {
+  const s = useStyles(styles);
+
+  if (accounts.length === 0) {
+    return (
+      <Text style={s.hint}>
+        No cards or wallets yet — add one under Investments to tag spending to it.
+      </Text>
+    );
+  }
+
+  return (
+    <Select
+      name={name}
+      label="Paid from"
+      defaultValue={defaultId ? String(defaultId) : ""}
+      options={[
+        { value: "", label: "Not tied to an account" },
+        ...accounts.map((a) => ({
+          value: String(a.id),
+          // The web's `{a.name} · {ASSET_TYPE_LABEL[a.asset_type]}`. The type is
+          // there because two cards from the same bank are otherwise one name.
+          label: `${a.name} · ${ASSET_TYPE_LABEL[a.asset_type]}`,
+        })),
+      ]}
+    />
+  );
+}
+
 // ============================================================= SwatchPicker
 
 /**
@@ -982,26 +1040,55 @@ export function CheckField({
  * The size is checked here so the message arrives before the save, and again in
  * `saveUpload` against the real file, because a declared size is a claim.
  *
- * `quality` and `max` are the two props the web original had no use for, and both
+ * `quality` and `max` are two props the web original had no use for, and both
  * exist for `app/bill/scan.tsx`. **`quality` is a limit, not a preference.** A bill
- * attached to a bill is only ever looked at, so 0.8 is right; a bill *sent to the API
- * to be read* has a second ceiling the attachment path does not — the Messages API
- * caps a single image at 5 MB, well under this file's own 12 MB — so the scan screen
- * asks for 0.6 and a modern phone's camera output lands comfortably inside both.
- * **`max` caps how many files survive**, because `scanBill` reads
- * `pickedFiles(fd)[0]` and nothing else: offering a multi-select that silently
+ * attached to a bill is only ever looked at, so 0.8 is right; a bill *sent to Gemini
+ * to be read* has a second ceiling the attachment path does not — a request may be
+ * 20 MB in total, well under this file's own 12 MB per file once base64 inflates it —
+ * so the scan screen asks for 0.6 and a modern phone's camera output lands
+ * comfortably inside both. **`max` caps how many files survive**, because `scanBill`
+ * reads `pickedFiles(fd)[0]` and nothing else: offering a multi-select that silently
  * discards everything after the first would be a worse answer than not offering it.
+ *
+ * `camera`, `docTypes`, `docLabel` and `hint` are the four the statement importer
+ * added, and they are the same widening the web made for the same reason: its
+ * `StatementUpload` passes `accept`, `multiple={false}`, `camera={false}`, a `title`
+ * and a `hint` to this same component rather than growing a second one. A bank
+ * statement is a file you were sent, never a photograph, so the two image chips come
+ * off; everything underneath them — the size cap, the "skipped — over 12 MB" note,
+ * the removable tiles, the registration with the form — is identical and is the part
+ * worth not having twice.
+ *
+ * The web's `title="Drop your statement here"` has no analogue and is not accepted:
+ * it labelled a drop zone, and there is nothing here to drop a file onto. `Field`'s
+ * own label says what the control is, which is what the title was for.
  */
 export function AttachmentPicker({
   name = "files",
   quality = 0.8,
   max,
+  camera: withCamera = true,
+  docTypes = "application/pdf",
+  docLabel = "PDF",
+  hint,
 }: {
   name?: string;
   /** JPEG compression for the two image pickers, 0–1. */
   quality?: number;
   /** Keep at most this many files. Unset means no cap, which is every bill form. */
   max?: number;
+  /** The camera and gallery chips. Off for anything that is not a photograph. */
+  camera?: boolean;
+  /**
+   * What the document chip accepts — `STATEMENT_PICKER_TYPES` for a statement. A
+   * list rather than one string because Android's file picker matches on MIME type
+   * and a CSV arrives under three of them depending on which app wrote it.
+   */
+  docTypes?: string | string[];
+  /** The document chip's label. "PDF" reads wrong when a CSV is the better answer. */
+  docLabel?: string;
+  /** Replaces the default "Photo or PDF · up to 12 MB" line. */
+  hint?: string;
 }) {
   const t = useTheme();
   const s = useStyles(styles);
@@ -1052,7 +1139,7 @@ export function AttachmentPicker({
   async function document() {
     setNote(null);
     const res = await DocumentPicker.getDocumentAsync({
-      type: "application/pdf",
+      type: docTypes,
       multiple: max !== 1,
       // Without this the URI can be a content:// handle that stops resolving once
       // the picker closes, and the copy in `saveUpload` would fail.
@@ -1068,14 +1155,22 @@ export function AttachmentPicker({
   return (
     <>
       <View style={s.pickRow}>
-        <ChipButton label="Photograph" icon="camera" onPress={() => void camera()} />
-        <ChipButton label="From gallery" icon="image" onPress={() => void library()} />
-        <ChipButton label="PDF" icon="file" onPress={() => void document()} />
+        {withCamera ? (
+          <>
+            <ChipButton label="Photograph" icon="camera" onPress={() => void camera()} />
+            <ChipButton label="From gallery" icon="image" onPress={() => void library()} />
+          </>
+        ) : null}
+        <ChipButton label={docLabel} icon="file" onPress={() => void document()} />
       </View>
-      <Text style={s.hint}>
-        Photo or PDF · up to {fmtBytes(MAX_UPLOAD_BYTES)}
-        {max === 1 ? "" : " each"}
-      </Text>
+      {hint ? (
+        <Text style={s.hint}>{hint}</Text>
+      ) : (
+        <Text style={s.hint}>
+          Photo or PDF · up to {fmtBytes(MAX_UPLOAD_BYTES)}
+          {max === 1 ? "" : " each"}
+        </Text>
+      )}
       {note ? <Text style={s.error}>{note}</Text> : null}
 
       {picked.length > 0 ? (

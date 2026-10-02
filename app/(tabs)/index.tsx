@@ -2,8 +2,9 @@
  * Home — `Finance/src/app/page.tsx`.
  *
  * The whole month on one screen: three concentric rings, the burn-rate figures,
- * the last seven days, where the money went, what is due, the goals and their
- * pace, net worth and the spending trend. Eight cards, twelve reads.
+ * the last seven days, the statement importer, where the money went, what is due,
+ * the goals and their pace, net worth and the spending trend. Nine cards, thirteen
+ * reads.
  *
  * Four things changed on the way over, and nothing else did.
  *
@@ -46,9 +47,11 @@ import type { TextStyle, ViewStyle } from "react-native";
 import { BarChart, BarRows, LineChart, RingLegend, Sparkline, TripleRing, toDayBars } from "@/components/charts";
 import { Screen } from "@/components/Screen";
 import { catIcon } from "@/components/Icon";
+import { StatementUpload } from "@/components/StatementUpload";
 import {
   Banner, Card, Chip, EmptyState, Dot, IconTile, LinkButton, PageHead, ProgressBar, SeeAll, StatTile,
 } from "@/components/ui";
+import { uploadStatement } from "@/lib/actions/statement";
 import { burnForecast, paceVsLastMonth } from "@/lib/analytics/forecast";
 import { addDays, addMonthKey, fmtDate, fmtMonth, fmtMonthShort, fmtDue, thisMonth, today } from "@/lib/date";
 import { useLive } from "@/lib/live";
@@ -61,7 +64,8 @@ import { getSettings } from "@/lib/queries/settings";
 import {
   categoryBreakdown, dailySpend, dataSpan, overallBudget, spendByMonth, spentInMonth,
 } from "@/lib/queries/stats";
-import type { RingData } from "@/lib/types";
+import { listBatches } from "@/lib/queries/statements";
+import type { RingData, StatementBatch } from "@/lib/types";
 import { useStyles, useTheme, type Theme } from "@/theme/ThemeProvider";
 import { font, radius, tnum, weight } from "@/theme/tokens";
 
@@ -79,7 +83,7 @@ async function load() {
 
   const [
     spent, budget, goalFunded, invested, week, categories,
-    upcoming, goals, netSeries, span, monthly, prevSpent,
+    upcoming, goals, netSeries, span, monthly, prevSpent, waiting,
   ] = await Promise.all([
     spentInMonth(mk, startDay),
     overallBudget(mk, settings.monthly_budget_minor),
@@ -93,6 +97,10 @@ async function load() {
     dataSpan(),
     spendByMonth(addMonthKey(mk, -5) + "-01"),
     spentInMonth(prev, startDay),
+    // The web kept this one out of its `Promise.all` because it swallows its own
+    // errors; swallowing them is exactly what makes it safe *inside* one, so it
+    // joins the round here rather than costing a second trip.
+    oldestUnreviewed(),
   ]);
 
   const rings: RingData = {
@@ -114,9 +122,28 @@ async function load() {
 
   return {
     settings, mk, now, week, categories, upcoming, goals, netSeries, monthly,
-    spent, budget, rings, burn, vsLast, netNow, netPrev, netDelta,
+    spent, budget, rings, burn, vsLast, netNow, netPrev, netDelta, waiting,
     empty: span.months === 0 && goals.length === 0,
   };
+}
+
+/**
+ * The statement sitting on the review screen, if there is one.
+ *
+ * Swallows its own errors, which is the web's decision and its reasoning: a
+ * `statement_batches` that cannot be read is a migration that has not landed, not a
+ * database that is down, and the right response is a Home screen with one fewer banner
+ * rather than the "database not reachable" card. `migrate()` runs in the root layout, so
+ * on a phone the table is always there by the time this runs — the guard is kept anyway,
+ * because it costs a `try` and the failure it prevents is the whole screen.
+ */
+async function oldestUnreviewed(): Promise<StatementBatch | null> {
+  try {
+    const batches = await listBatches(10);
+    return batches.filter((b) => !b.committed_at).pop() ?? null;
+  } catch {
+    return null;
+  }
 }
 
 type Data = Awaited<ReturnType<typeof load>>;
@@ -135,6 +162,11 @@ function Feed({ d }: { d: Data }) {
   const t = useTheme();
   const s = useStyles(styles);
   const router = useRouter();
+
+  // Hoisted to a local so the narrowing survives into the `onPress` closure below —
+  // reading `d.waiting` inside it would widen back to `StatementBatch | null`. Same
+  // reason `app/more.tsx` keeps a local for its `href`.
+  const waiting = d.waiting;
 
   return (
     <>
@@ -235,6 +267,49 @@ function Feed({ d }: { d: Data }) {
         {/* -------------------------------------------------------- last 7 days */}
         <Card title="Last 7 days" note="Paid expenses per day">
           <BarChart bars={toDayBars(d.week, d.now)} height={140} />
+        </Card>
+
+        {/* ------------------------------------------------- import a statement */}
+        {/*
+          High up on purpose, and in the web's own position — after the last-7-days
+          card, before the categories. One statement is a month of entries, so this is
+          the fastest route from an empty journal to a full one, and the thing most
+          worth finding without being told it exists. The control is the same component
+          the importer's own screen uses, so there is one upload path, not a simplified
+          copy that drifts.
+        */}
+        <Card
+          title="Import a bank statement"
+          note="PDF or CSV · read on this phone · nothing is added until you have ticked the rows"
+          action={<SeeAll href="/statement" />}
+        >
+          {waiting ? (
+            <Banner tone="warn" icon="clock">
+              <Text style={s.bold}>{waiting.original_name}</Text>
+              {` was read but nothing from it has been added yet — ${waiting.row_count} row${
+                waiting.row_count === 1 ? "" : "s"
+              } are waiting. `}
+              {/* A nested `<Text onPress>` rather than a `Pressable`: a tappable word
+                  inside a sentence has to flow with the sentence, and `Banner` has
+                  already put a `<Text>` around its children. Same construction as
+                  `app/statement/index.tsx`'s copy of this banner. */}
+              <Text
+                style={s.bannerLink}
+                onPress={() =>
+                  router.push({
+                    pathname: "/statement/[id]",
+                    params: { id: String(waiting.id) },
+                  })
+                }
+              >
+                Review them
+              </Text>
+              .
+            </Banner>
+          ) : null}
+          <View style={waiting ? s.bannerWrap : undefined}>
+            <StatementUpload action={uploadStatement} compact />
+          </View>
         </Card>
 
         {/* ------------------------------------------------------- where it went */}
@@ -428,6 +503,9 @@ const styles = (t: Theme) => ({
   bannerWrap: { marginTop: 18 } as ViewStyle,
   sparkWrap: { marginTop: 14 } as ViewStyle,
   bold: { fontWeight: weight.medium } as TextStyle,
+  /** A tappable word inside a `Banner`'s sentence. Colour and weight stay the
+      banner's, so the word does not shout louder than the sentence around it. */
+  bannerLink: { textDecorationLine: "underline" } as TextStyle,
 
   // `.grid g-2` with `gap: 22px` — two columns at every width on the web, so the
   // phone keeps them. 48% rather than 50% leaves room for the column gap.

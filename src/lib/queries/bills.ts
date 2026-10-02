@@ -30,9 +30,11 @@ const BILL_SELECT = `
          c.name  AS category_name,
          c.color AS category_color,
          c.icon  AS category_icon,
+         h.name  AS holding_name,
          (SELECT count(*) FROM attachments a WHERE a.bill_id = b.id) AS attachment_count
   FROM bills b
-  LEFT JOIN categories c ON c.id = b.category_id`;
+  LEFT JOIN categories c ON c.id = b.category_id
+  LEFT JOIN holdings   h ON h.id = b.holding_id`;
 
 export async function getCategories(includeArchived = false): Promise<Category[]> {
   const rows = await q<Category>(
@@ -66,6 +68,7 @@ export async function listBills(opts: {
   categoryId?: number | null;
   kind?: "expense" | "income" | null;
   status?: BillStatus | null;
+  holdingId?: number | null;
   limit?: number;
   offset?: number;
 }): Promise<BillRow[]> {
@@ -93,6 +96,10 @@ export async function listBills(opts: {
   if (opts.status) {
     params.push(opts.status);
     where.push(`b.status = ?${params.length}`);
+  }
+  if (opts.holdingId) {
+    params.push(opts.holdingId);
+    where.push(`b.holding_id = ?${params.length}`);
   }
 
   params.push(opts.limit ?? 200, opts.offset ?? 0);

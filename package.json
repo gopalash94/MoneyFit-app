@@ -9,10 +9,13 @@
     "prebuild": "expo prebuild --platform android",
     "typecheck": "tsc --noEmit",
     "fix-deps": "expo install --fix",
-    "install-deps": "expo install expo-router expo-sqlite expo-file-system expo-image-picker expo-document-picker expo-secure-store expo-crypto expo-sharing expo-constants expo-linking expo-status-bar expo-system-ui react-native-svg react-native-safe-area-context react-native-screens react-native-gesture-handler"
+    "install-deps": "expo install expo-router expo-sqlite expo-file-system expo-image-picker expo-document-picker expo-secure-store expo-crypto expo-sharing expo-constants expo-linking expo-status-bar expo-system-ui expo-asset react-native-svg react-native-safe-area-context react-native-screens react-native-gesture-handler react-native-webview",
+    "bundle-pdfjs": "node scripts/bundle-pdfjs.mjs",
+    "postinstall": "node scripts/bundle-pdfjs.mjs"
   },
   "dependencies": {
     "expo": "~57.0.0",
+    "expo-asset": "~12.0.0",
     "expo-constants": "~19.0.0",
     "expo-crypto": "~16.0.0",
     "expo-document-picker": "~15.0.0",
@@ -31,10 +34,12 @@
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.19.0",
     "react-native-svg": "15.14.0",
+    "react-native-webview": "13.16.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.0",
+    "pdfjs-dist": "3.11.174",
     "typescript": "~5.9.2"
   }
 }

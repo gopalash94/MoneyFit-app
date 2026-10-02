@@ -31,8 +31,8 @@
  * as a three-way control in Settings, through `saveProfile`.
  *
  * **`saveAiKey` and `clearAiKey` are new**, and they are the only two functions in this
- * file with no web counterpart at all. On the web the Anthropic key is
- * `ANTHROPIC_API_KEY` in `.env`, read by the server, and there is nothing for a form to
+ * file with no web counterpart at all. On the web the Gemini key is
+ * `GEMINI_API_KEY` in `.env`, read by the server, and there is nothing for a form to
  * do with it. Here it is typed into Settings, so it needs an action shaped like every
  * other form on that screen — `(prev, fd) => Promise<FormState>` — around
  * `saveApiKey`, which takes a plain string. Neither function goes near the database:
@@ -211,14 +211,17 @@ export async function saveCategoryBudgets(_prev: FormState, fd: FormData): Promi
 }
 
 /**
- * Store the Anthropic key typed into Settings.
+ * Store the Gemini key typed into Settings.
  *
  * No format check, deliberately: `secrets.ts` explains why at length — a wrong key
  * already produces one clear sentence from the API, whereas a prefix test here would
  * lock the app out of a key format that has not been invented yet. All this does is
  * refuse a blank submission and hand the rest to `saveApiKey`, which trims it.
  *
- * The 200-character cap matches the field's own `maxLength`; a key is about 110.
+ * The 200-character cap matches the field's own `maxLength`. A Google AI Studio key is
+ * about 40 characters on the older `AIza…` form and about 50 on the current `AQ.…` one,
+ * so the cap is generous rather than tight — which is the right way round, for the same
+ * reason there is no prefix check.
  */
 export async function saveAiKey(_prev: FormState, fd: FormData): Promise<FormState> {
   const key = str(fd, "api_key", 200);

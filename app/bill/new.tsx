@@ -2,7 +2,7 @@
  * Add a bill — `Finance/src/app/journal/new/page.tsx`.
  *
  * Two ways in, exactly as on the web: cold, which is a blank form, or with
- * `?scan=<stored name>`, which is a draft Claude read off a photo or a PDF waiting to
+ * `?scan=<stored name>`, which is a draft Gemini read off a photo or a PDF waiting to
  * be confirmed. The page itself is thin — it loads the categories and the draft, picks
  * the heading, and hands both to `BillForm`.
  *
@@ -30,6 +30,7 @@ import { discardScan } from "@/lib/actions/scan";
 import { today } from "@/lib/date";
 import { useLive } from "@/lib/live";
 import { getCategories } from "@/lib/queries/bills";
+import { listPaymentAccounts } from "@/lib/queries/holdings";
 import { getScanDraft } from "@/lib/queries/scan";
 
 export default function NewBillScreen() {
@@ -45,6 +46,7 @@ export default function NewBillScreen() {
   const live = useLive(
     async () => ({
       categories: await getCategories(),
+      accounts: await listPaymentAccounts(),
       // `getScanDraft` gates the name against `STORED_NAME` itself, so a hand-typed
       // `?scan=%` reads nothing rather than going fishing in the cache table.
       scan: name ? await getScanDraft(name) : null,
@@ -56,7 +58,7 @@ export default function NewBillScreen() {
     <>
       <Stack.Screen options={{ title: live.data?.scan ? "Check and save" : "Add bill" }} />
       <Screen live={live}>
-        {({ categories, scan }) => (
+        {({ categories, accounts, scan }) => (
           <>
             <PageHead
               title={scan ? "Check and save" : "Add bill"}
@@ -79,6 +81,7 @@ export default function NewBillScreen() {
             <BillForm
               action={(prev, fd) => saveBill(null, prev, fd)}
               categories={categories}
+              accounts={accounts}
               scan={scan}
               discard={
                 scan

@@ -7,11 +7,13 @@
  * the new-bill screen imports `getScanDraft` and `ScanDraft` from exactly here and
  * matching the import graph is worth more than saving a file.
  *
- * The type and the gate below are unchanged. The one dialect edit is inside
- * `readCache`, not in this file.
+ * The type and the gate below are unchanged. What did change is where the draft
+ * is read from: the old general-purpose `ai_cache` table is gone, replaced by
+ * `scan_drafts`, which exists for this one job. The read is three lines, so it
+ * lives here now rather than behind a cache module that cached nothing else.
  */
 
-import { readCache } from "@/lib/ai/cache";
+import { j, q1 } from "@/lib/db";
 import type { SavedFile } from "@/lib/files";
 import type { BillStatus, Kind } from "@/lib/types";
 import type { Recurrence } from "@/lib/recurrence";
@@ -20,11 +22,11 @@ import { STORED_NAME } from "@/lib/upload-meta";
 /**
  * A scanned bill waiting to be confirmed.
  *
- * It lives in `ai_cache` under `kind = 'scan'`, `scope = <stored file name>`,
- * which is doing two jobs at once. It carries the draft across the navigation
- * without a drafts table, and — because the file metadata is read back from here
- * rather than from hidden inputs — the attachment a bill adopts cannot be swapped
- * for another one by editing the form.
+ * It lives in `scan_drafts`, keyed by the stored file name, which is doing two
+ * jobs at once. It carries the draft across the navigation without a route
+ * param big enough to hold it, and — because the file metadata is read back
+ * from here rather than from hidden inputs — the attachment a bill adopts
+ * cannot be swapped for another one by editing the form.
  */
 export type ScanDraft = {
   file: SavedFile;
@@ -46,13 +48,19 @@ export type ScanDraft = {
 /**
  * `?scan=` arrives as a route parameter, so it is checked against the stored-name
  * shape before it becomes a query parameter — the same gate `resolveStored` uses.
- * Nothing here touches the filesystem, but a scope of `%` should not be a way to
- * go fishing in the cache table either.
+ * Nothing here touches the filesystem, but a key of `%` should not be a way to go
+ * fishing in the drafts table either.
  */
 export async function getScanDraft(fileName: string): Promise<ScanDraft | null> {
   if (!STORED_NAME.test(fileName)) return null;
-  // Fingerprint is irrelevant for a one-shot draft: a fresh UUID per upload means
-  // this row is written once and read once, so freshness has nothing to compare.
-  const hit = await readCache<ScanDraft>("scan", fileName, "");
-  return hit?.value ?? null;
+
+  const row = await q1<{ payload: string }>(
+    "SELECT payload FROM scan_drafts WHERE file_name = ?1",
+    [fileName],
+  );
+  if (!row) return null;
+
+  // A payload that will not parse is treated as absent, not as an error: the cost
+  // is one more tap on the camera, where throwing would be a broken screen.
+  return j<ScanDraft>(row.payload);
 }

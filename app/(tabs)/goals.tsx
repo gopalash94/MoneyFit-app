@@ -24,27 +24,29 @@
  * **The card grid is one column.** `.grid.g-2` at 360dp would put a 44px icon tile,
  * a name, a pace chip and a sparkline into half a screen width.
  *
- * **The coaching card has its own load.** Above the list sits the question no
- * individual row can ask — whether all of these fit together inside what is actually
- * left over each month. Every figure in it is computed here and handed over as
- * finished text; only the verdict is the model's.
+ * **The coaching card.** Above the list sits the question no individual row can ask —
+ * whether all of these fit together inside what is actually left over each month.
+ * Every figure in it is computed here, and `writeCoaching` decides which constraint
+ * binds and what gives.
  *
- * On the web the page awaits it, so the whole page waits on an API call. That is
- * survivable for a server render that streams and fatal here: the four figures, the
+ * **The structural change that used to be here is worth recording.** The verdict was a
+ * hosted-model call, so `Coach` had a `useLive` of its own: the four figures, the
  * over-budget banner and every pace chip below are arithmetic over rows this device
- * already has, and holding them behind twenty seconds of network would make this a
- * worse screen than the web's. So `Coach` has its own `useLive`, exactly as
- * `insights.tsx`'s `Narrative` does, and for the same two reasons stated there:
- * `useLive` captures `load` through a ref, so the freshly-built brief is the one that
- * gets sent even though `deps` cannot mention it, and `cached()` fingerprints that
- * brief, so a `refreshAll()` from anywhere costs an API call only when the figures it
- * would summarise have actually moved.
+ * already has, and holding them behind twenty seconds of network would have made this
+ * a worse screen than the web's. There was also a cache, so that a `refreshAll()` from
+ * anywhere did not pay twice for a verdict about a month that had not moved.
  *
- * **Both of the web's failure sentences survive**, which is why `loadCoaching`
- * returns a tagged result rather than throwing: a brief that could not be built is
- * one query out of seven and says so quietly, whereas a call that failed with nothing
- * cached behind it is the one `useLive` surfaces as an error — and `useLive` has only
- * the one error channel to surface it through.
+ * `writeCoaching` is synchronous arithmetic over the brief, so the brief is built in
+ * this screen's own `load()` — seven more SQLite reads beside the ten already there —
+ * and the card is assembled during the same render as everything else. No second load,
+ * no spinner, no error banner, no retry, no "needs an API key" empty state and no
+ * cache; none of those have anything left to describe.
+ *
+ * **The web's quiet failure survives**, which is why `loadCoaching` returns a tagged
+ * result rather than throwing. The screen's own handler has already survived
+ * `listGoals`, so a brief that could not be built is one query out of seven: it says
+ * so in a banner above the list rather than replacing a screen whose every other
+ * figure is fine.
  */
 
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -57,12 +59,10 @@ import { useSetParams } from "@/components/filters";
 import { ActionButton } from "@/components/form";
 import { Screen } from "@/components/Screen";
 import {
-  AiNotConfigured, Banner, Card, Chip, EmptyState, IconTile, LinkButton, Loading,
+  Banner, Card, Chip, EmptyState, IconTile, LinkButton,
   PageHead, ProgressBar, StatTile, type Tone,
 } from "@/components/ui";
-import { cached, type CacheHit } from "@/lib/ai/cache";
-import { aiConfigured } from "@/lib/ai/client";
-import { generateCoaching, type CoachBrief, type Coaching } from "@/lib/ai/coach";
+import { writeCoaching, type CoachBrief, type Coaching } from "@/lib/analytics/coaching";
 import { addMonthKey, fmtDate, thisMonth } from "@/lib/date";
 import { goalIcon } from "@/lib/goal-icon";
 import { useLive } from "@/lib/live";
@@ -85,6 +85,13 @@ type Loaded = {
   fundedThisMonth: number;
   /** Cumulative-saved points per live goal id, for the row sparklines. */
   sparks: Map<number, number[]>;
+  /**
+   * The coaching verdict, or null when there is no live goal to judge. Built here
+   * rather than inside the card: the brief is seven more reads, this screen already
+   * does ten, and they are all local. One load, one render — which is what the web
+   * does too, now that there is no API call to keep out of the critical path.
+   */
+  coach: CoachState | null;
 };
 
 async function load(showArchived: boolean): Promise<Loaded> {
@@ -106,7 +113,20 @@ async function load(showArchived: boolean): Promise<Loaded> {
     live.map((g, i) => [g.id, series[i].map((r) => r.cumulative_minor)]),
   );
 
-  return { goals, settings, fundedThisMonth, sparks };
+  // Recomputed in `Goals` below, for the tiles and the over-budget banner. `paceOf`
+  // is pure and runs over a handful of goals, so deriving the figure twice is cheaper
+  // than threading it back out of the loaded data and into two layers of props.
+  const monthlyNeed = live.reduce((sum, g) => sum + (paceOf(g).requiredPerMonthMinor ?? 0), 0);
+
+  return {
+    goals,
+    settings,
+    fundedThisMonth,
+    sparks,
+    // The web's gate, unchanged: nothing runs for somebody with no goals, because the
+    // brief costs seven queries and would be built only to be thrown away.
+    coach: live.length > 0 ? await loadCoaching(live, settings, monthlyNeed) : null,
+  };
 }
 
 /** A param can legitimately arrive twice; the first spelling of it wins. */
@@ -134,7 +154,7 @@ function Goals({ data, showArchived }: { data: Loaded; showArchived: boolean }) 
   const s = useStyles(styles);
   const setParams = useSetParams();
 
-  const { goals, settings, fundedThisMonth, sparks } = data;
+  const { goals, settings, fundedThisMonth, sparks, coach } = data;
 
   const live = goals.filter((g) => !g.archived);
   const done = live.filter((g) => g.saved_minor >= g.target_minor);
@@ -182,7 +202,10 @@ function Goals({ data, showArchived }: { data: Loaded; showArchived: boolean }) 
                 size="sm"
                 sub={
                   target > 0
-                    ? `${pct(fundedThisMonth, target)}% of the ${fmtCompact(target)} monthly target`
+                    ? // `pct` returns the raw float on purpose, so that the callers wanting a
+                      // decimal place can have one. A whole number is right here, and without
+                      // the rounding this tile reads "61.24401913875598%".
+                      `${Math.round(pct(fundedThisMonth, target))}% of the ${fmtCompact(target)} monthly target`
                     : "No monthly target set"
                 }
               />
@@ -192,7 +215,7 @@ function Goals({ data, showArchived }: { data: Loaded; showArchived: boolean }) 
                 label="Saved across all goals"
                 value={fmtWhole(totalSaved)}
                 size="sm"
-                sub={`${pct(totalSaved, totalTarget)}% of ${fmtCompact(totalTarget)}`}
+                sub={`${Math.round(pct(totalSaved, totalTarget))}% of ${fmtCompact(totalTarget)}`}
               />
             </View>
             <View style={s.fact}>
@@ -223,17 +246,7 @@ function Goals({ data, showArchived }: { data: Loaded; showArchived: boolean }) 
             </Banner>
           ) : null}
 
-          {/* The web's gate, unchanged: nothing runs for somebody with no goals, and
-              nothing runs without a key, because the brief costs seven queries and
-              would be built only to be thrown away. `aiConfigured()` is checked here
-              rather than inside `Coach` so the hook below it never runs at all. */}
-          {live.length > 0 ? (
-            aiConfigured() ? (
-              <Coach live={live} settings={settings} monthlyNeed={monthlyNeed} />
-            ) : (
-              <AiNotConfigured feature="Plan coaching" />
-            )
-          ) : null}
+          {coach ? <Coach live={live} state={coach} /> : null}
 
           {goals.map((g) => (
             <GoalCard key={g.id} goal={g} spark={sparks.get(g.id) ?? []} />
@@ -370,18 +383,17 @@ function rateValue(p: Pace): string {
 // --------------------------------------------------------------- the coaching card
 
 /**
- * What one load produced.
+ * What the load produced.
  *
- * The web renders four outcomes and reaches three of them by returning early from a
- * server component. `useLive` has exactly one error channel, so three of the four are
- * values here and only the fourth — `cached()` failing with nothing in the table to
- * fall back on, which is also the only one the web lets reach its own catch — travels
- * as a rejection. That is what keeps the two failure sentences distinct.
+ * The web reaches three outcomes by returning early from a server component, and all
+ * three are values here rather than one of them being a rejection. That is the whole
+ * change: there is no fourth outcome any more, because there is no call that can fail
+ * with nothing cached behind it.
  */
 type CoachState =
   | { kind: "brief_failed"; message: string }
   | { kind: "thin" }
-  | { kind: "ready"; hit: CacheHit<Coaching> & { staleReason?: string } };
+  | { kind: "ready"; coaching: Coaching };
 
 async function loadCoaching(
   live: GoalRow[],
@@ -398,55 +410,20 @@ async function loadCoaching(
   }
 
   // Two months of bills cannot establish what is typically left over, and a confident
-  // verdict built on them is a guess wearing a number.
+  // verdict built on them is a guess wearing a number. `writeCoaching` would return
+  // "unknown" for this case on its own; the web keeps the explicit card anyway,
+  // because "not enough history" is a different thing to say than "unknown".
   if (brief.monthsOfHistory < 2) return { kind: "thin" };
 
-  return {
-    kind: "ready",
-    hit: await cached<Coaching>("coach", "plan", brief, () => generateCoaching(brief)),
-  };
+  return { kind: "ready", coaching: writeCoaching(brief) };
 }
 
 /**
- * The coaching card. The caller has already established that there are goals and that
- * a key is configured.
+ * The three outcomes, dispatched. The caller has already established that there are
+ * goals to judge.
  */
-function Coach({ live, settings, monthlyNeed }: {
-  live: GoalRow[];
-  settings: Settings;
-  monthlyNeed: number;
-}) {
-  const t = useTheme();
+function Coach({ live, state }: { live: GoalRow[]; state: CoachState }) {
   const s = useStyles(styles);
-  const router = useRouter();
-
-  // Two primitives, always two. They are belt and braces rather than the real
-  // trigger: every write in the app ends in `refreshAll()`, which `useLive` watches on
-  // its own, and `cached()` decides from the brief's fingerprint whether that re-read
-  // costs an API call. The archived toggle deliberately does not appear — `live` is
-  // already the unarchived goals, so archiving one changes `live.length` anyway.
-  const ai = useLive(() => loadCoaching(live, settings, monthlyNeed), [live.length, monthlyNeed]);
-
-  const failed = ai.error;
-  if (failed) {
-    return (
-      <Banner tone="warn" icon="alert">
-        {`The coaching summary is unavailable: ${failed.message} Everything else on this screen is computed on this device and is unaffected.`}
-      </Banner>
-    );
-  }
-
-  const state = ai.data;
-  if (!state) {
-    return (
-      <Card
-        title="Checking whether the plan closes"
-        note="Claude is being sent figures computed on this device"
-      >
-        <Loading label="Working through the plan…" />
-      </Card>
-    );
-  }
 
   if (state.kind === "brief_failed") {
     return (
@@ -468,8 +445,18 @@ function Coach({ live, settings, monthlyNeed }: {
     );
   }
 
-  const hit = state.hit;
-  const c = hit.value;
+  return <CoachCard live={live} c={state.coaching} />;
+}
+
+/**
+ * The verdict chip, the per-goal join and the tradeoff banner, from a `Coaching`
+ * worked out on this phone.
+ */
+function CoachCard({ live, c }: { live: GoalRow[]; c: Coaching }) {
+  const t = useTheme();
+  const s = useStyles(styles);
+  const router = useRouter();
+
   const byName = new Map(c.goals.map((g) => [g.name, g]));
 
   return (
@@ -483,9 +470,9 @@ function Coach({ live, settings, monthlyNeed }: {
     >
       <Text style={s.coachSummary}>{c.summary}</Text>
 
-      {/* Joined back onto the real goals rather than rendered from the model's list: a
-          name it altered simply has no verdict, instead of appearing on screen as a
-          goal that does not exist. */}
+      {/* Joined back onto the real goals rather than rendered from the assessment's
+          own list, so a name that does not match simply has no verdict instead of
+          appearing on screen as a goal that does not exist. */}
       <View style={s.verdictList}>
         {live.map((g) => {
           const v = byName.get(g.name);
@@ -523,7 +510,7 @@ function Coach({ live, settings, monthlyNeed }: {
           <Text style={s.leversLabel}>Where the difference could come from</Text>
           <View style={s.leverList}>
             {c.levers.map((l, i) => (
-              // Index keys: one positional list from one response, and nothing
+              // Index keys: one positional list from one assessment, and nothing
               // reorders or removes an entry while it is on screen.
               <View key={i} style={s.lever}>
                 <Text style={s.leverTitle}>{l.title}</Text>
@@ -544,16 +531,17 @@ function Coach({ live, settings, monthlyNeed }: {
       ) : null}
 
       <Text style={s.cardNote}>
-        {hit.staleReason
-          ? `Showing the previous assessment — a new one could not be generated (${hit.staleReason})`
-          : `Written by ${hit.model ?? "Claude"} from figures computed on this device · ${stamp(hit.at)}`}
+        Worked out on this phone: the required monthly total against what is typically left over,
+        and the furthest deadline as the cheapest thing to move. It applies the same rules every
+        month, which is also why it will never talk you into a plan the arithmetic does not
+        support.
       </Text>
     </Card>
   );
 }
 
 /**
- * Everything the model is allowed to say, computed here.
+ * Every figure the card is allowed to quote, computed here.
  *
  * Medians rather than means, and the current month is excluded: it is half-finished,
  * and including it makes "typically left over" wrong by however much of the month has
@@ -604,7 +592,6 @@ async function buildBrief(
         : null,
     fundedTypical: fmtWhole(fundedTypical),
     requiredPerMonthTotal: fmtWhole(monthlyNeed),
-    shortfall: phraseShortfall(monthlyNeed, typicalSurplus),
     goals: live.slice(0, 8).map((g) => {
       const p = paceOf(g);
       const r = recentByGoal.get(g.id);
@@ -618,7 +605,9 @@ async function buildBrief(
         monthsLeft: p.daysLeft === null ? null : Math.max(0, Math.round(p.daysLeft / 30.44)),
         status: PACE_LABEL[p.status],
         requiredPerMonth:
-          p.requiredPerMonthMinor === null ? null : fmtWhole(p.requiredPerMonthMinor),
+          p.requiredPerMonthMinor !== null && p.requiredPerMonthMinor > 0
+            ? fmtWhole(p.requiredPerMonthMinor)
+            : null,
         gap:
           p.status === "no_deadline" || p.status === "done"
             ? null
@@ -627,6 +616,11 @@ async function buildBrief(
               : `${fmtWhole(p.gapMinor)} ahead of the straight line`,
         recentPerMonth:
           r && r.months > 0 ? fmtWhole(Math.round(r.total_minor / r.months)) : null,
+        // The comparable forms of the three fields above: picking which goal gives
+        // means ranking them, and a formatted string cannot be ranked.
+        statusCode: p.status,
+        requiredPerMonthMinor: p.requiredPerMonthMinor,
+        gapMinor: p.status === "no_deadline" || p.status === "done" ? null : p.gapMinor,
       };
     }),
     // Divided by the months the category itself appears in, not by the window: school
@@ -642,28 +636,16 @@ async function buildBrief(
           typical: fmtWhole(typical),
           limit: limit === null ? null : fmtWhole(limit),
           overBy: limit !== null && typical > limit ? fmtWhole(typical - limit) : null,
+          typicalMinor: typical,
+          overByMinor: limit !== null && typical > limit ? typical - limit : null,
         };
       }),
-  };
-}
 
-/**
- * The one subtraction the whole card turns on, done here and handed over as a
- * finished sentence so the model has no reason to attempt it.
- */
-function phraseShortfall(monthlyNeed: number, typicalSurplus: number | null): string {
-  if (monthlyNeed <= 0) {
-    return "No goal has a deadline, so there is no required monthly figure to compare against. Say that rather than inventing a schedule.";
-  }
-  if (typicalSurplus === null) {
-    return "No income has been recorded, so there is no figure for what is left over and no shortfall can be computed. Do not guess one — say that income entries are needed before the plan can be judged.";
-  }
-  if (typicalSurplus <= 0) {
-    return `Nothing is typically left over at all — spending matches or exceeds income in a normal month, so the whole ${fmtWhole(monthlyNeed)} a month would have to come from somewhere that does not currently exist.`;
-  }
-  return monthlyNeed <= typicalSurplus
-    ? `That fits inside the ${fmtWhole(typicalSurplus)} typically left over, leaving ${fmtWhole(typicalSurplus - monthlyNeed)} a month spare.`
-    : `That is ${fmtWhole(monthlyNeed - typicalSurplus)} a month more than the ${fmtWhole(typicalSurplus)} typically left over, so the plan does not close as written.`;
+    // Numbers rather than strings, for the comparisons the verdict turns on.
+    requiredPerMonthTotalMinor: monthlyNeed,
+    typicalSurplusMinor: typicalSurplus,
+    typicalSpendMinor: typicalSpend,
+  };
 }
 
 /** Median, not mean: one annual premium should not redefine a normal month. */
@@ -672,15 +654,6 @@ function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const mid = s.length >> 1;
   return s.length % 2 === 1 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
-}
-
-/**
- * SQLite writes `ai_cache.created_at` as `'YYYY-MM-DD HH:MM:SS'` already, but a value
- * that came back from `new Date().toISOString()` has a T in it. Cutting at 16
- * characters leaves the date and the minute either way.
- */
-function stamp(at: string): string {
-  return at.replace("T", " ").slice(0, 16);
 }
 
 const VERDICT_LABEL: Record<Coaching["verdict"], string> = {

@@ -1,14 +1,16 @@
 /**
- * The sidebar's lower half — the four destinations that did not fit in a bottom bar.
+ * The sidebar's lower half — the five destinations that did not fit in a bottom bar.
  *
- * In `Nav.tsx` these sat below a `.nav-sep`, under the "TOOLS" `.nav-label`, with
- * Profile above them: Ask, Insights, Settings. Nine items in a column is a sidebar;
- * on a phone the five you live in are tabs and these four are one tap behind the
- * header button.
+ * In `Nav.tsx` these sat below a `.nav-sep`: Year and Profile under the "ANALYSIS"
+ * `.nav-label`, then Ask, Insights and Settings under "TOOLS". Ten items in a column
+ * is a sidebar; on a phone the five you live in are tabs and these five are one tap
+ * behind the header button. The order is the sidebar's, groups and all — Year leads
+ * because it leads the Analysis group there, which is also roughly how often you want
+ * it relative to Settings.
  *
  * Each row's destination is filled in by the phase that builds it — under typed
  * routes an `href` naming a file that does not exist yet is a compile error, not a
- * broken button, which is the whole reason this list is data rather than four
+ * broken button, which is the whole reason this list is data rather than five
  * hardcoded `<Link>`s. A row with no `href` renders dimmed and does not respond to
  * a tap, so the app is launchable and honest about what is not built rather than
  * silently doing nothing when pressed.
@@ -32,6 +34,12 @@ type Row = {
 };
 
 const ROWS: Row[] = [
+  {
+    icon: "calendar",
+    label: "Year",
+    sub: "A whole calendar year — cashflow, goals, investing, net worth",
+    href: "/year",
+  },
   {
     icon: "profile",
     label: "Profile",

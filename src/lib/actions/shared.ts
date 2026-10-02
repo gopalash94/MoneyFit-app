@@ -34,10 +34,12 @@
  * There is no `File` in React Native, so that same filter lives here once, against
  * `PickedFile`.
  *
- * **`FormState` gains `savedId` and `scan`.** The web's actions ended in `redirect()`,
- * which threw; navigation is the screen's job here, and it needs either the id of the row
- * that was just written or — for `scanBill` alone — the name of the file that was just
- * read. Both fields are documented at length on the type below.
+ * **`FormState` gains `savedId`, `scan` and `seenBefore`.** The web's actions ended in
+ * `redirect()`, which threw; navigation is the screen's job here, and it needs the id of
+ * the row that was just written, or — for `scanBill` alone — the name of the file that
+ * was just read, or — for `uploadStatement` alone — whether the id it is being sent is a
+ * new batch or one that already existed. All three were parts of a URL on the web. Each
+ * is documented at length on the type below.
  */
 
 import { today, type ISODate } from "@/lib/date";
@@ -73,11 +75,25 @@ export type FormState = {
    *
    * `scanBill` ended in ``redirect(`/journal/new?scan=${saved.file_name}`)`` on the web.
    * The destination is the ordinary new-bill form, which reads the draft back out of
-   * `ai_cache` by this name — so the screen needs the name, and a UUID will not fit in
+   * `scan_drafts` by this name — so the screen needs the name, and a UUID will not fit in
    * `savedId`. Everything else on the trip is identical: still a route parameter, still
    * gated by `STORED_NAME` before it reaches `getScanDraft`.
    */
   scan?: string;
+  /**
+   * Set by `uploadStatement` when the file you picked had already been uploaded, so
+   * `savedId` is an *existing* batch rather than a new one. The third field the web's
+   * type did not have, and for the third time the same reason: it was a query
+   * parameter there.
+   *
+   * The web redirected to ``/journal/statement/${id}?seen=1`` and the review screen
+   * read `searchParams.seen` to say "you have uploaded this exact file before, so it
+   * was not stored twice". A screen here navigates instead of redirecting, and it
+   * cannot work this out for itself — a batch that already existed and one created a
+   * moment ago are the same row. So the action says so, and the screen passes it on
+   * as a route parameter.
+   */
+  seenBefore?: boolean;
 } | null;
 
 export function fail(error: string, fields?: Record<string, string>): FormState {

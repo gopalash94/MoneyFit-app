@@ -210,7 +210,7 @@ function Detail({ bill, attachments, related, history }: Loaded & { bill: BillRo
                       <Chip icon="repeat">{RECURRENCE_LABEL[bill.recurrence]}</Chip>
                     ) : null}
                     {bill.source === "ai" ? (
-                      <Chip icon="sparkle" title="Fields were read from an upload by Claude">
+                      <Chip icon="sparkle" title="Fields were read from an upload by Gemini">
                         Read from the bill
                       </Chip>
                     ) : null}

@@ -29,14 +29,19 @@ import { saveBill } from "@/lib/actions/bills";
 import { today } from "@/lib/date";
 import { useLive } from "@/lib/live";
 import { getBill, getCategories } from "@/lib/queries/bills";
-import type { BillRow, Category } from "@/lib/types";
+import { listPaymentAccounts } from "@/lib/queries/holdings";
+import type { BillRow, Category, PaymentAccount } from "@/lib/types";
 
-type Loaded = { bill: BillRow | null; categories: Category[] };
+type Loaded = { bill: BillRow | null; categories: Category[]; accounts: PaymentAccount[] };
 
 async function load(n: number): Promise<Loaded> {
-  if (!Number.isInteger(n) || n <= 0) return { bill: null, categories: [] };
-  const [bill, categories] = await Promise.all([getBill(n), getCategories()]);
-  return { bill, categories };
+  if (!Number.isInteger(n) || n <= 0) return { bill: null, categories: [], accounts: [] };
+  const [bill, categories, accounts] = await Promise.all([
+    getBill(n),
+    getCategories(),
+    listPaymentAccounts(),
+  ]);
+  return { bill, categories, accounts };
 }
 
 export default function EditBillScreen() {
@@ -49,13 +54,14 @@ export default function EditBillScreen() {
     <>
       <Stack.Screen options={{ title: "Edit bill" }} />
       <Screen live={live}>
-        {({ bill, categories }) =>
+        {({ bill, categories, accounts }) =>
           bill ? (
             <>
               <PageHead title="Edit bill" sub={bill.merchant} />
               <BillForm
                 action={(prev, fd) => saveBill(n, prev, fd)}
                 categories={categories}
+                accounts={accounts}
                 bill={bill}
                 today={today()}
                 onDone={(state) => {
